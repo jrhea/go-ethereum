@@ -49,10 +49,9 @@ func newStatePrefetcher(config *params.ChainConfig, chain *HeaderChain) *statePr
 // Prefetch processes the state changes according to the Ethereum rules by running
 // the transaction messages using the statedb, but any changes are discarded. The
 // only goal is to warm the state caches.
-func (p *statePrefetcher) Prefetch(block *types.Block, statedb *state.StateDB, cfg vm.Config, interrupt *atomic.Bool) {
+func (p *statePrefetcher) Prefetch(header *types.Header, txs types.Transactions, gasLimit uint64, statedb *state.StateDB, cfg vm.Config, interrupt *atomic.Bool) {
 	var (
 		fails   atomic.Int64
-		header  = block.Header()
 		signer  = types.MakeSigner(p.config, header.Number, header.Time)
 		workers errgroup.Group
 		reader  = statedb.Reader()
@@ -60,7 +59,7 @@ func (p *statePrefetcher) Prefetch(block *types.Block, statedb *state.StateDB, c
 	workers.SetLimit(max(1, 4*runtime.NumCPU()/5)) // Aggressively run the prefetching
 
 	// Iterate over and process the individual transactions
-	for i, tx := range block.Transactions() {
+	for i, tx := range txs {
 		stateCpy := statedb.Copy() // closure
 		workers.Go(func() error {
 			// If block precaching was interrupted, abort
@@ -107,7 +106,7 @@ func (p *statePrefetcher) Prefetch(block *types.Block, statedb *state.StateDB, c
 
 			// We attempt to apply a transaction. The goal is not to execute
 			// the transaction successfully, rather to warm up touched data slots.
-			if _, err := ApplyMessage(evm, msg, new(GasPool).AddGas(block.GasLimit())); err != nil {
+			if _, err := ApplyMessage(evm, msg, new(GasPool).AddGas(gasLimit)); err != nil {
 				fails.Add(1)
 				return nil // Ugh, something went horribly wrong, bail out
 			}
@@ -116,7 +115,7 @@ func (p *statePrefetcher) Prefetch(block *types.Block, statedb *state.StateDB, c
 	}
 	workers.Wait()
 
-	blockPrefetchTxsValidMeter.Mark(int64(len(block.Transactions())) - fails.Load())
+	blockPrefetchTxsValidMeter.Mark(int64(len(txs)) - fails.Load())
 	blockPrefetchTxsInvalidMeter.Mark(fails.Load())
 	return
 }
