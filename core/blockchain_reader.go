@@ -416,6 +416,30 @@ func (bc *BlockChain) StateAt(root common.Hash) (*state.StateDB, error) {
 	return state.New(root, bc.statedb)
 }
 
+// StateWithSharedCache returns two StateDB instances that share the same
+// underlying reader cache. The first is intended for the state
+// prefetcher and the second for the real execution.
+func (bc *BlockChain) StateAtWithSharedCache(root common.Hash) (throwaway *state.StateDB, statedb *state.StateDB, err error) {
+	prefetch, process, err := bc.statedb.ReadersWithCacheStats(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	throwaway, err = state.NewWithReader(root, bc.statedb, prefetch)
+	if err != nil {
+		return nil, nil, err
+	}
+	statedb, err = state.NewWithReader(root, bc.statedb, process)
+	if err != nil {
+		return nil, nil, err
+	}
+	return throwaway, statedb, nil
+}
+
+// StatePrefetcher returns the state prefetcher used by the blockchain.
+func (bc *BlockChain) StatePrefetcher() Prefetcher {
+	return bc.prefetcher
+}
+
 // HistoricState returns a historic state specified by the given root.
 // Live states are not available and won't be served, please use `State`
 // or `StateAt` instead.

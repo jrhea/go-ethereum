@@ -116,8 +116,8 @@ type generateParams struct {
 }
 
 // generateWork generates a sealing block based on the given parameters.
-func (miner *Miner) generateWork(genParam *generateParams, witness bool) *newPayloadResult {
-	work, err := miner.prepareWork(genParam, witness)
+func (miner *Miner) generateWork(genParam *generateParams, witness bool, statedb *state.StateDB) *newPayloadResult {
+	work, err := miner.prepareWork(genParam, witness, statedb)
 	if err != nil {
 		return &newPayloadResult{err: err}
 	}
@@ -194,7 +194,7 @@ func (miner *Miner) generateWork(genParam *generateParams, witness bool) *newPay
 // prepareWork constructs the sealing task according to the given parameters,
 // either based on the last chain head or specified parent. In this function
 // the pending transactions are not filled yet, only the empty task returned.
-func (miner *Miner) prepareWork(genParams *generateParams, witness bool) (*environment, error) {
+func (miner *Miner) prepareWork(genParams *generateParams, witness bool, statedb *state.StateDB) (*environment, error) {
 	miner.confMu.RLock()
 	defer miner.confMu.RUnlock()
 
@@ -259,7 +259,7 @@ func (miner *Miner) prepareWork(genParams *generateParams, witness bool) (*envir
 	// Could potentially happen if starting to mine in an odd state.
 	// Note genParams.coinbase can be different with header.Coinbase
 	// since clique algorithm can modify the coinbase field in header.
-	env, err := miner.makeEnv(parent, header, genParams.coinbase, witness)
+	env, err := miner.makeEnv(parent, header, genParams.coinbase, witness, statedb)
 	if err != nil {
 		log.Error("Failed to create sealing context", "err", err)
 		return nil, err
@@ -273,12 +273,17 @@ func (miner *Miner) prepareWork(genParams *generateParams, witness bool) (*envir
 	return env, nil
 }
 
-// makeEnv creates a new environment for the sealing block.
-func (miner *Miner) makeEnv(parent *types.Header, header *types.Header, coinbase common.Address, witness bool) (*environment, error) {
-	// Retrieve the parent state to execute on top.
-	state, err := miner.chain.StateAt(parent.Root)
-	if err != nil {
-		return nil, err
+// makeEnv creates a new environment for the sealing block. If statedb is
+// non-nil it will be used directly instead of creating a fresh state from
+// the parent root.
+func (miner *Miner) makeEnv(parent *types.Header, header *types.Header, coinbase common.Address, witness bool, state *state.StateDB) (*environment, error) {
+	// Retrieve the parent state to execute on top, unless one was provided.
+	if state == nil {
+		var err error
+		state, err = miner.chain.StateAt(parent.Root)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if witness {
 		bundle, err := stateless.NewWitness(header, miner.chain)
@@ -538,6 +543,53 @@ func (miner *Miner) fillTransactions(interrupt *atomic.Int32, env *environment) 
 		}
 	}
 	return nil
+}
+
+// pendingTransactions returns a flat list of resolved pending transactions
+// suitable for the state prefetcher. It applies the same fee filters as
+// fillTransactions but does not order or deduplicate — the prefetcher only
+// needs a best-effort set of transactions to warm the cache.
+func (miner *Miner) pendingTransactions(header *types.Header) types.Transactions {
+	miner.confMu.RLock()
+	tip := miner.config.GasPrice
+	miner.confMu.RUnlock()
+
+	filter := txpool.PendingFilter{
+		MinTip: uint256.MustFromBig(tip),
+	}
+	if header.BaseFee != nil {
+		filter.BaseFee = uint256.MustFromBig(header.BaseFee)
+	}
+	if header.ExcessBlobGas != nil {
+		filter.BlobFee = uint256.MustFromBig(eip4844.CalcBlobFee(miner.chainConfig, header))
+	}
+	if miner.chainConfig.IsOsaka(header.Number, header.Time) {
+		filter.GasLimitCap = params.MaxTxGas
+	}
+	// Collect plain transactions
+	filter.BlobTxs = false
+	pending := miner.txpool.Pending(filter)
+
+	// Collect blob transactions
+	filter.BlobTxs = true
+	if miner.chainConfig.IsOsaka(header.Number, header.Time) {
+		filter.BlobVersion = types.BlobSidecarVersion1
+	} else {
+		filter.BlobVersion = types.BlobSidecarVersion0
+	}
+	for addr, txs := range miner.txpool.Pending(filter) {
+		pending[addr] = append(pending[addr], txs...)
+	}
+	// Resolve lazy transactions into real transactions
+	var txs types.Transactions
+	for _, list := range pending {
+		for _, ltx := range list {
+			if tx := ltx.Resolve(); tx != nil {
+				txs = append(txs, tx)
+			}
+		}
+	}
+	return txs
 }
 
 // totalFees computes total consumed miner fees in Wei. Block transactions and receipts have to have the same order.
