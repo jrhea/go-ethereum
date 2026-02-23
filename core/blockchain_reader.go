@@ -417,10 +417,7 @@ func (bc *BlockChain) StateAt(root common.Hash) (*state.StateDB, error) {
 }
 
 // StateAtWithSharedCache returns a throwaway StateDB for the state prefetcher
-// and a process-side Reader that shares the same underlying cache. Callers
-// should create fresh StateDB instances from the returned reader (via
-// state.NewWithReader) for each build iteration so that every iteration
-// starts from a clean state while still benefiting from the shared cache.
+// and a Reader that shares the same underlying cache.
 func (bc *BlockChain) StateAtWithSharedCache(root common.Hash) (throwaway *state.StateDB, processReader state.Reader, err error) {
 	prefetch, process, err := bc.statedb.ReadersWithCacheStats(root)
 	if err != nil {
@@ -444,6 +441,9 @@ func (bc *BlockChain) StatePrefetcher() Prefetcher {
 func (bc *BlockChain) HistoricState(root common.Hash) (*state.StateDB, error) {
 	return state.New(root, state.NewHistoricDatabase(bc.db, bc.triedb))
 }
+
+// NoPrefetch returns whether state prefetching is disabled.
+func (bc *BlockChain) NoPrefetch() bool { return bc.cfg.NoPrefetch }
 
 // Config retrieves the chain's fork configuration.
 func (bc *BlockChain) Config() *params.ChainConfig { return bc.chainConfig }

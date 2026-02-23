@@ -236,22 +236,24 @@ func (miner *Miner) buildPayload(args *BuildPayloadArgs, witness bool) (*Payload
 	// building loop, warming the cache with pending transaction execution.
 	var (
 		prefetchInterrupt atomic.Bool
-		builderReader     state.Reader // shared-cache reader for generateWork, nil if prefetch setup fails
+		builderReader     state.Reader
 	)
 	parentRoot := empty.block.ParentHash()
-	if parent := miner.chain.GetHeaderByHash(parentRoot); parent != nil {
-		throwaway, processReader, err := miner.chain.StateAtWithSharedCache(parent.Root)
-		if err == nil {
-			builderReader = processReader
+	if !miner.chain.NoPrefetch() {
+		if parent := miner.chain.GetHeaderByHash(parentRoot); parent != nil {
+			throwaway, reader, err := miner.chain.StateAtWithSharedCache(parent.Root)
+			if err == nil {
+				builderReader = reader
 
-			// Peek at the pending transactions and fire the prefetcher.
-			header := empty.block.Header()
-			txs := miner.pendingTransactions(header)
+				// Peek at the pending transactions and fire the prefetcher.
+				header := empty.block.Header()
+				txs := miner.pendingTransactions(header)
 
-			go func() {
-				prefetcher := miner.chain.StatePrefetcher()
-				prefetcher.Prefetch(header, txs, header.GasLimit, throwaway, vm.Config{}, &prefetchInterrupt)
-			}()
+				go func() {
+					prefetcher := miner.chain.StatePrefetcher()
+					prefetcher.Prefetch(header, txs, header.GasLimit, throwaway, vm.Config{}, &prefetchInterrupt)
+				}()
+			}
 		}
 	}
 
