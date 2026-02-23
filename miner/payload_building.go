@@ -236,13 +236,13 @@ func (miner *Miner) buildPayload(args *BuildPayloadArgs, witness bool) (*Payload
 	// building loop, warming the cache with pending transaction execution.
 	var (
 		prefetchInterrupt atomic.Bool
-		builderState      *state.StateDB // shared-cache state for generateWork, nil if prefetch setup fails
+		builderReader     state.Reader // shared-cache reader for generateWork, nil if prefetch setup fails
 	)
 	parentRoot := empty.block.ParentHash()
 	if parent := miner.chain.GetHeaderByHash(parentRoot); parent != nil {
-		throwaway, statedb, err := miner.chain.StateAtWithSharedCache(parent.Root)
+		throwaway, processReader, err := miner.chain.StateAtWithSharedCache(parent.Root)
 		if err == nil {
-			builderState = statedb
+			builderReader = processReader
 
 			// Peek at the pending transactions and fire the prefetcher.
 			header := empty.block.Header()
@@ -292,11 +292,7 @@ func (miner *Miner) buildPayload(args *BuildPayloadArgs, witness bool) (*Payload
 				default:
 				}
 				start := time.Now()
-				r := miner.generateWork(fullParams, witness, builderState)
-				// Only use the shared-cache state for the first iteration;
-				// subsequent iterations create their own fresh state since the
-				// shared state has already been mutated.
-				builderState = nil
+				r := miner.generateWork(fullParams, witness, builderReader)
 
 				if r.err == nil {
 					payload.update(r, time.Since(start))

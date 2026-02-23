@@ -116,8 +116,8 @@ type generateParams struct {
 }
 
 // generateWork generates a sealing block based on the given parameters.
-func (miner *Miner) generateWork(genParam *generateParams, witness bool, statedb *state.StateDB) *newPayloadResult {
-	work, err := miner.prepareWork(genParam, witness, statedb)
+func (miner *Miner) generateWork(genParam *generateParams, witness bool, reader state.Reader) *newPayloadResult {
+	work, err := miner.prepareWork(genParam, witness, reader)
 	if err != nil {
 		return &newPayloadResult{err: err}
 	}
@@ -194,7 +194,7 @@ func (miner *Miner) generateWork(genParam *generateParams, witness bool, statedb
 // prepareWork constructs the sealing task according to the given parameters,
 // either based on the last chain head or specified parent. In this function
 // the pending transactions are not filled yet, only the empty task returned.
-func (miner *Miner) prepareWork(genParams *generateParams, witness bool, statedb *state.StateDB) (*environment, error) {
+func (miner *Miner) prepareWork(genParams *generateParams, witness bool, reader state.Reader) (*environment, error) {
 	miner.confMu.RLock()
 	defer miner.confMu.RUnlock()
 
@@ -259,7 +259,7 @@ func (miner *Miner) prepareWork(genParams *generateParams, witness bool, statedb
 	// Could potentially happen if starting to mine in an odd state.
 	// Note genParams.coinbase can be different with header.Coinbase
 	// since clique algorithm can modify the coinbase field in header.
-	env, err := miner.makeEnv(parent, header, genParams.coinbase, witness, statedb)
+	env, err := miner.makeEnv(parent, header, genParams.coinbase, witness, reader)
 	if err != nil {
 		log.Error("Failed to create sealing context", "err", err)
 		return nil, err
@@ -273,34 +273,39 @@ func (miner *Miner) prepareWork(genParams *generateParams, witness bool, statedb
 	return env, nil
 }
 
-// makeEnv creates a new environment for the sealing block. If statedb is
-// non-nil it will be used directly instead of creating a fresh state from
-// the parent root.
-func (miner *Miner) makeEnv(parent *types.Header, header *types.Header, coinbase common.Address, witness bool, state *state.StateDB) (*environment, error) {
-	// Retrieve the parent state to execute on top, unless one was provided.
-	if state == nil {
-		var err error
-		state, err = miner.chain.StateAt(parent.Root)
-		if err != nil {
-			return nil, err
-		}
+// makeEnv creates a new environment for the sealing block. If reader is
+// non-nil a fresh StateDB will be created from it instead of calling
+// chain.StateAt (this is used to share a cached reader across iterations).
+func (miner *Miner) makeEnv(parent *types.Header, header *types.Header, coinbase common.Address, witness bool, reader state.Reader) (*environment, error) {
+	// Retrieve the parent state to execute on top.
+	var (
+		statedb *state.StateDB
+		err     error
+	)
+	if reader != nil {
+		statedb, err = state.NewWithReader(parent.Root, miner.chain.StateCache(), reader)
+	} else {
+		statedb, err = miner.chain.StateAt(parent.Root)
+	}
+	if err != nil {
+		return nil, err
 	}
 	if witness {
 		bundle, err := stateless.NewWitness(header, miner.chain)
 		if err != nil {
 			return nil, err
 		}
-		state.StartPrefetcher("miner", bundle, nil)
+		statedb.StartPrefetcher("miner", bundle, nil)
 	}
 	// Note the passed coinbase may be different with header.Coinbase.
 	return &environment{
 		signer:   types.MakeSigner(miner.chainConfig, header.Number, header.Time),
-		state:    state,
+		state:    statedb,
 		size:     uint64(header.Size()),
 		coinbase: coinbase,
 		header:   header,
-		witness:  state.Witness(),
-		evm:      vm.NewEVM(core.NewEVMBlockContext(header, miner.chain, &coinbase), state, miner.chainConfig, vm.Config{}),
+		witness:  statedb.Witness(),
+		evm:      vm.NewEVM(core.NewEVMBlockContext(header, miner.chain, &coinbase), statedb, miner.chainConfig, vm.Config{}),
 	}, nil
 }
 
