@@ -21,13 +21,16 @@ import (
 	"encoding/binary"
 	"math/big"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/beacon/engine"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/stateless"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -225,16 +228,47 @@ func (miner *Miner) buildPayload(args *BuildPayloadArgs, witness bool) (*Payload
 		slotNum:     args.SlotNum,
 		noTxs:       true,
 	}
-	empty := miner.generateWork(emptyParams, witness)
+	empty := miner.generateWork(emptyParams, witness, nil, nil)
 	if empty.err != nil {
 		return nil, empty.err
 	}
 	// Construct a payload object for return.
 	payload := newPayload(empty.block, empty.requests, empty.witness, args.Id())
 
+	// Set up the state prefetcher: create a shared-cache reader pair so the
+	// prefetcher and all subsequent generateWork calls share one underlying
+	// state cache. The prefetcher fires immediately and races with the block
+	// building loop, warming the cache with pending transaction execution.
+	var (
+		prefetchInterrupt atomic.Bool
+		builderReader     state.Reader
+		builderDB         state.Database
+	)
+	parentRoot := empty.block.ParentHash()
+	if !miner.chain.NoPrefetch() {
+		if parent := miner.chain.GetHeaderByHash(parentRoot); parent != nil {
+			throwaway, reader, sdb, err := miner.chain.StateAtWithSharedCache(parent.Root)
+			if err == nil {
+				builderReader = reader
+				builderDB = sdb
+
+				// Peek at the pending transactions and fire the prefetcher.
+				header := empty.block.Header()
+				txs := miner.pendingTransactions(header)
+
+				go func() {
+					prefetcher := miner.chain.StatePrefetcher()
+					prefetcher.Prefetch(header, txs, header.GasLimit, throwaway, vm.Config{}, &prefetchInterrupt)
+				}()
+			}
+		}
+	}
+
 	// Spin up a routine for updating the payload in background. This strategy
 	// can maximum the revenue for including transactions with highest fee.
 	go func() {
+		defer prefetchInterrupt.Store(true) // terminate the prefetcher when done
+
 		// Setup the timer for re-building the payload. The initial clock is kept
 		// for triggering process immediately.
 		timer := time.NewTimer(0)
@@ -272,7 +306,8 @@ func (miner *Miner) buildPayload(args *BuildPayloadArgs, witness bool) (*Payload
 				default:
 				}
 				start := time.Now()
-				r := miner.generateWork(fullParams, witness)
+				r := miner.generateWork(fullParams, witness, builderReader, builderDB)
+
 				if r.err == nil {
 					payload.update(r, time.Since(start))
 				} else {
@@ -307,7 +342,7 @@ func (miner *Miner) BuildTestingPayload(args *BuildPayloadArgs, transactions []*
 		overrideExtraData: extraData,
 		overrideTxs:       transactions,
 	}
-	res := miner.generateWork(fullParams, false)
+	res := miner.generateWork(fullParams, false, nil, nil)
 	if res.err != nil {
 		return nil, res.err
 	}

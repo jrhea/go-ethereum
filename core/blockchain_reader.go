@@ -416,12 +416,36 @@ func (bc *BlockChain) StateAt(root common.Hash) (*state.StateDB, error) {
 	return state.New(root, state.NewDatabase(bc.triedb, bc.codedb).WithSnapshot(bc.snaps))
 }
 
+// StateAtWithSharedCache returns a throwaway StateDB for the state prefetcher,
+// a Reader that shares the same underlying cache for the block builder, and the
+// CachingDB so the builder can construct its own StateDB from the reader.
+func (bc *BlockChain) StateAtWithSharedCache(root common.Hash) (throwaway *state.StateDB, processReader state.Reader, db state.Database, err error) {
+	sdb := state.NewDatabase(bc.triedb, bc.codedb).WithSnapshot(bc.snaps)
+	prefetch, process, err := sdb.ReadersWithCacheStats(root)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	throwaway, err = state.NewWithReader(root, sdb, prefetch)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return throwaway, process, sdb, nil
+}
+
+// StatePrefetcher returns the state prefetcher used by the blockchain.
+func (bc *BlockChain) StatePrefetcher() Prefetcher {
+	return bc.prefetcher
+}
+
 // HistoricState returns a historic state specified by the given root.
 // Live states are not available and won't be served, please use `State`
 // or `StateAt` instead.
 func (bc *BlockChain) HistoricState(root common.Hash) (*state.StateDB, error) {
 	return state.New(root, state.NewHistoricDatabase(bc.triedb, bc.codedb))
 }
+
+// NoPrefetch returns whether state prefetching is disabled.
+func (bc *BlockChain) NoPrefetch() bool { return bc.cfg.NoPrefetch }
 
 // Config retrieves the chain's fork configuration.
 func (bc *BlockChain) Config() *params.ChainConfig { return bc.chainConfig }

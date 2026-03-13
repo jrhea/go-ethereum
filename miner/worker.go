@@ -97,14 +97,15 @@ const maxBlockSizeBufferZone = 1_000_000
 
 // newPayloadResult is the result of payload generation.
 type newPayloadResult struct {
-	err      error
-	block    *types.Block
-	fees     *big.Int               // total block fees
-	sidecars []*types.BlobTxSidecar // collected blobs of blob transactions
-	stateDB  *state.StateDB         // StateDB after executing the transactions
-	receipts []*types.Receipt       // Receipts collected during construction
-	requests [][]byte               // Consensus layer requests collected during block construction
-	witness  *stateless.Witness     // Witness is an optional stateless proof
+	err         error
+	block       *types.Block
+	fees        *big.Int               // total block fees
+	sidecars    []*types.BlobTxSidecar // collected blobs of blob transactions
+	stateDB     *state.StateDB         // StateDB after executing the transactions
+	receipts    []*types.Receipt       // Receipts collected during construction
+	requests    [][]byte               // Consensus layer requests collected during block construction
+	witness     *stateless.Witness     // Witness is an optional stateless proof
+	interrupted bool                   // true if fillTransactions was interrupted before finishing
 }
 
 // generateParams wraps various settings for generating sealing task.
@@ -125,8 +126,8 @@ type generateParams struct {
 }
 
 // generateWork generates a sealing block based on the given parameters.
-func (miner *Miner) generateWork(genParam *generateParams, witness bool) *newPayloadResult {
-	work, err := miner.prepareWork(genParam, witness)
+func (miner *Miner) generateWork(genParam *generateParams, witness bool, reader state.Reader, db state.Database) *newPayloadResult {
+	work, err := miner.prepareWork(genParam, witness, reader, db)
 	if err != nil {
 		return &newPayloadResult{err: err}
 	}
@@ -142,6 +143,7 @@ func (miner *Miner) generateWork(genParam *generateParams, witness bool) *newPay
 	// Also add size of withdrawals to work block size.
 	work.size += uint64(genParam.withdrawals.Size())
 
+	var interrupted bool
 	if !genParam.noTxs {
 		// If forceOverrides is true and overrideTxs is not empty, commit the override transactions
 		// otherwise, fill the block with the current transactions from the txpool
@@ -159,7 +161,6 @@ func (miner *Miner) generateWork(genParam *generateParams, witness bool) *newPay
 				interrupt.Store(commitInterruptTimeout)
 			})
 			defer timer.Stop()
-
 			err := miner.fillTransactions(interrupt, work)
 			if errors.Is(err, errBlockInterruptedByTimeout) {
 				log.Warn("Block building is interrupted", "allowance", common.PrettyDuration(miner.config.Recommit))
@@ -200,20 +201,21 @@ func (miner *Miner) generateWork(genParam *generateParams, witness bool) *newPay
 		return &newPayloadResult{err: err}
 	}
 	return &newPayloadResult{
-		block:    block,
-		fees:     totalFees(block, work.receipts),
-		sidecars: work.sidecars,
-		stateDB:  work.state,
-		receipts: work.receipts,
-		requests: requests,
-		witness:  work.witness,
+		block:       block,
+		fees:        totalFees(block, work.receipts),
+		sidecars:    work.sidecars,
+		stateDB:     work.state,
+		receipts:    work.receipts,
+		requests:    requests,
+		witness:     work.witness,
+		interrupted: interrupted,
 	}
 }
 
 // prepareWork constructs the sealing task according to the given parameters,
 // either based on the last chain head or specified parent. In this function
 // the pending transactions are not filled yet, only the empty task returned.
-func (miner *Miner) prepareWork(genParams *generateParams, witness bool) (*environment, error) {
+func (miner *Miner) prepareWork(genParams *generateParams, witness bool, reader state.Reader, db state.Database) (*environment, error) {
 	miner.confMu.RLock()
 	defer miner.confMu.RUnlock()
 
@@ -288,7 +290,7 @@ func (miner *Miner) prepareWork(genParams *generateParams, witness bool) (*envir
 	// Could potentially happen if starting to mine in an odd state.
 	// Note genParams.coinbase can be different with header.Coinbase
 	// since clique algorithm can modify the coinbase field in header.
-	env, err := miner.makeEnv(parent, header, genParams.coinbase, witness)
+	env, err := miner.makeEnv(parent, header, genParams.coinbase, witness, reader, db)
 	if err != nil {
 		log.Error("Failed to create sealing context", "err", err)
 		return nil, err
@@ -302,10 +304,20 @@ func (miner *Miner) prepareWork(genParams *generateParams, witness bool) (*envir
 	return env, nil
 }
 
-// makeEnv creates a new environment for the sealing block.
-func (miner *Miner) makeEnv(parent *types.Header, header *types.Header, coinbase common.Address, witness bool) (*environment, error) {
+// makeEnv creates a new environment for the sealing block. If reader and db
+// are non-nil a fresh StateDB will be created from them instead of calling
+// chain.StateAt (this is used to share a cached reader across iterations).
+func (miner *Miner) makeEnv(parent *types.Header, header *types.Header, coinbase common.Address, witness bool, reader state.Reader, db state.Database) (*environment, error) {
 	// Retrieve the parent state to execute on top.
-	state, err := miner.chain.StateAt(parent.Root)
+	var (
+		statedb *state.StateDB
+		err     error
+	)
+	if reader != nil && db != nil {
+		statedb, err = state.NewWithReader(parent.Root, db, reader)
+	} else {
+		statedb, err = miner.chain.StateAt(parent.Root)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -316,17 +328,17 @@ func (miner *Miner) makeEnv(parent *types.Header, header *types.Header, coinbase
 			return nil, err
 		}
 	}
-	state.StartPrefetcher("miner", bundle, nil)
+	statedb.StartPrefetcher("miner", bundle, nil)
 	// Note the passed coinbase may be different with header.Coinbase.
 	return &environment{
 		signer:   types.MakeSigner(miner.chainConfig, header.Number, header.Time),
-		state:    state,
+		state:    statedb,
 		size:     uint64(header.Size()),
 		coinbase: coinbase,
 		gasPool:  core.NewGasPool(header.GasLimit),
 		header:   header,
-		witness:  state.Witness(),
-		evm:      vm.NewEVM(core.NewEVMBlockContext(header, miner.chain, &coinbase), state, miner.chainConfig, vm.Config{}),
+		witness:  statedb.Witness(),
+		evm:      vm.NewEVM(core.NewEVMBlockContext(header, miner.chain, &coinbase), statedb, miner.chainConfig, vm.Config{}),
 	}, nil
 }
 
@@ -565,6 +577,53 @@ func (miner *Miner) fillTransactions(interrupt *atomic.Int32, env *environment) 
 		}
 	}
 	return nil
+}
+
+// pendingTransactions returns a flat list of resolved pending transactions
+// suitable for the state prefetcher. It applies the same fee filters as
+// fillTransactions but does not order or deduplicate — the prefetcher only
+// needs a best-effort set of transactions to warm the cache.
+func (miner *Miner) pendingTransactions(header *types.Header) types.Transactions {
+	miner.confMu.RLock()
+	tip := miner.config.GasPrice
+	miner.confMu.RUnlock()
+
+	filter := txpool.PendingFilter{
+		MinTip: uint256.MustFromBig(tip),
+	}
+	if header.BaseFee != nil {
+		filter.BaseFee = uint256.MustFromBig(header.BaseFee)
+	}
+	if header.ExcessBlobGas != nil {
+		filter.BlobFee = uint256.MustFromBig(eip4844.CalcBlobFee(miner.chainConfig, header))
+	}
+	if miner.chainConfig.IsOsaka(header.Number, header.Time) {
+		filter.GasLimitCap = params.MaxTxGas
+	}
+	// Collect plain transactions
+	filter.BlobTxs = false
+	pending := miner.txpool.Pending(filter)
+
+	// Collect blob transactions
+	filter.BlobTxs = true
+	if miner.chainConfig.IsOsaka(header.Number, header.Time) {
+		filter.BlobVersion = types.BlobSidecarVersion1
+	} else {
+		filter.BlobVersion = types.BlobSidecarVersion0
+	}
+	for addr, txs := range miner.txpool.Pending(filter) {
+		pending[addr] = append(pending[addr], txs...)
+	}
+	// Resolve lazy transactions into real transactions
+	var txs types.Transactions
+	for _, list := range pending {
+		for _, ltx := range list {
+			if tx := ltx.Resolve(); tx != nil {
+				txs = append(txs, tx)
+			}
+		}
+	}
+	return txs
 }
 
 // totalFees computes total consumed miner fees in Wei. Block transactions and receipts have to have the same order.

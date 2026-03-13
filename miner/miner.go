@@ -165,7 +165,7 @@ func (miner *Miner) getPending() *newPayloadResult {
 		withdrawals: withdrawal,
 		beaconRoot:  nil,
 		noTxs:       false,
-	}, false) // we will never make a witness for a pending block
+	}, false, nil, nil) // we will never make a witness for a pending block
 	if ret.err != nil {
 		return nil
 	}
