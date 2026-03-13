@@ -416,18 +416,20 @@ func (bc *BlockChain) StateAt(root common.Hash) (*state.StateDB, error) {
 	return state.New(root, state.NewDatabase(bc.triedb, bc.codedb).WithSnapshot(bc.snaps))
 }
 
-// StateAtWithSharedCache returns a throwaway StateDB for the state prefetcher
-// and a Reader that shares the same underlying cache.
-func (bc *BlockChain) StateAtWithSharedCache(root common.Hash) (throwaway *state.StateDB, processReader state.Reader, err error) {
-	prefetch, process, err := bc.statedb.ReadersWithCacheStats(root)
+// StateAtWithSharedCache returns a throwaway StateDB for the state prefetcher,
+// a Reader that shares the same underlying cache for the block builder, and the
+// CachingDB so the builder can construct its own StateDB from the reader.
+func (bc *BlockChain) StateAtWithSharedCache(root common.Hash) (throwaway *state.StateDB, processReader state.Reader, db state.Database, err error) {
+	sdb := state.NewDatabase(bc.triedb, bc.codedb).WithSnapshot(bc.snaps)
+	prefetch, process, err := sdb.ReadersWithCacheStats(root)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	throwaway, err = state.NewWithReader(root, bc.statedb, prefetch)
+	throwaway, err = state.NewWithReader(root, sdb, prefetch)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return throwaway, process, nil
+	return throwaway, process, sdb, nil
 }
 
 // StatePrefetcher returns the state prefetcher used by the blockchain.

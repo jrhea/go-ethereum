@@ -228,7 +228,7 @@ func (miner *Miner) buildPayload(args *BuildPayloadArgs, witness bool) (*Payload
 		slotNum:     args.SlotNum,
 		noTxs:       true,
 	}
-	empty := miner.generateWork(emptyParams, witness, nil)
+	empty := miner.generateWork(emptyParams, witness, nil, nil)
 	if empty.err != nil {
 		return nil, empty.err
 	}
@@ -242,13 +242,15 @@ func (miner *Miner) buildPayload(args *BuildPayloadArgs, witness bool) (*Payload
 	var (
 		prefetchInterrupt atomic.Bool
 		builderReader     state.Reader
+		builderDB         state.Database
 	)
 	parentRoot := empty.block.ParentHash()
 	if !miner.chain.NoPrefetch() {
 		if parent := miner.chain.GetHeaderByHash(parentRoot); parent != nil {
-			throwaway, reader, err := miner.chain.StateAtWithSharedCache(parent.Root)
+			throwaway, reader, sdb, err := miner.chain.StateAtWithSharedCache(parent.Root)
 			if err == nil {
 				builderReader = reader
+				builderDB = sdb
 
 				// Peek at the pending transactions and fire the prefetcher.
 				header := empty.block.Header()
@@ -304,7 +306,7 @@ func (miner *Miner) buildPayload(args *BuildPayloadArgs, witness bool) (*Payload
 				default:
 				}
 				start := time.Now()
-				r := miner.generateWork(fullParams, witness, builderReader)
+				r := miner.generateWork(fullParams, witness, builderReader, builderDB)
 
 				if r.err == nil {
 					payload.update(r, time.Since(start))
@@ -340,7 +342,7 @@ func (miner *Miner) BuildTestingPayload(args *BuildPayloadArgs, transactions []*
 		overrideExtraData: extraData,
 		overrideTxs:       transactions,
 	}
-	res := miner.generateWork(fullParams, false)
+	res := miner.generateWork(fullParams, false, nil, nil)
 	if res.err != nil {
 		return nil, res.err
 	}
