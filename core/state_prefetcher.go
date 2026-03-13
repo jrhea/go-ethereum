@@ -106,7 +106,7 @@ func (p *statePrefetcher) Prefetch(header *types.Header, txs types.Transactions,
 
 			// We attempt to apply a transaction. The goal is not to execute
 			// the transaction successfully, rather to warm up touched data slots.
-			if _, err := ApplyMessage(evm, msg, new(GasPool).AddGas(gasLimit)); err != nil {
+			if _, err := ApplyMessage(evm, msg, nil); err != nil {
 				fails.Add(1)
 				return nil // Ugh, something went horribly wrong, bail out
 			}
