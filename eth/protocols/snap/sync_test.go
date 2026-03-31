@@ -121,7 +121,6 @@ func BenchmarkHashing(b *testing.B) {
 type (
 	accountHandlerFunc    func(t *testPeer, requestId uint64, root common.Hash, origin common.Hash, limit common.Hash, cap int) error
 	storageHandlerFunc    func(t *testPeer, requestId uint64, root common.Hash, accounts []common.Hash, origin, limit []byte, max int) error
-	trieHandlerFunc       func(t *testPeer, requestId uint64, root common.Hash, paths []TrieNodePathSet, cap int) error
 	codeHandlerFunc       func(t *testPeer, id uint64, hashes []common.Hash, max int) error
 	accessListHandlerFunc func(t *testPeer, id uint64, hashes []common.Hash, max int) error
 )
@@ -138,7 +137,6 @@ type testPeer struct {
 
 	accountRequestHandler    accountHandlerFunc
 	storageRequestHandler    storageHandlerFunc
-	trieRequestHandler       trieHandlerFunc
 	codeRequestHandler       codeHandlerFunc
 	accessListRequestHandler accessListHandlerFunc
 	term                     func()
@@ -147,7 +145,6 @@ type testPeer struct {
 	nAccountRequests    int
 	nStorageRequests    int
 	nBytecodeRequests   int
-	nTrienodeRequests   int
 	nAccessListRequests int
 }
 
@@ -157,7 +154,6 @@ func newTestPeer(id string, t *testing.T, term func()) *testPeer {
 		test:                     t,
 		logger:                   log.New("id", id),
 		accountRequestHandler:    defaultAccountRequestHandler,
-		trieRequestHandler:       defaultTrieRequestHandler,
 		storageRequestHandler:    defaultStorageRequestHandler,
 		codeRequestHandler:       defaultCodeRequestHandler,
 		accessListRequestHandler: defaultAccessListRequestHandler,
@@ -182,21 +178,13 @@ func (t *testPeer) Stats() string {
 	return fmt.Sprintf(`Account requests: %d
 Storage requests: %d
 Bytecode requests: %d
-Trienode requests: %d
-`, t.nAccountRequests, t.nStorageRequests, t.nBytecodeRequests, t.nTrienodeRequests)
+`, t.nAccountRequests, t.nStorageRequests, t.nBytecodeRequests)
 }
 
 func (t *testPeer) RequestAccountRange(id uint64, root, origin, limit common.Hash, bytes int) error {
 	t.logger.Trace("Fetching range of accounts", "reqid", id, "root", root, "origin", origin, "limit", limit, "bytes", common.StorageSize(bytes))
 	t.nAccountRequests++
 	go t.accountRequestHandler(t, id, root, origin, limit, bytes)
-	return nil
-}
-
-func (t *testPeer) RequestTrieNodes(id uint64, root common.Hash, count int, paths []TrieNodePathSet, bytes int) error {
-	t.logger.Trace("Fetching set of trie nodes", "reqid", id, "root", root, "pathsets", len(paths), "bytes", common.StorageSize(bytes))
-	t.nTrienodeRequests++
-	go t.trieRequestHandler(t, id, root, paths, bytes)
 	return nil
 }
 
@@ -226,34 +214,6 @@ func (t *testPeer) RequestAccessLists(id uint64, hashes []common.Hash, bytes int
 }
 
 // defaultTrieRequestHandler is a well-behaving handler for trie healing requests
-func defaultTrieRequestHandler(t *testPeer, requestId uint64, root common.Hash, paths []TrieNodePathSet, cap int) error {
-	// Pass the response
-	var nodes [][]byte
-	for _, pathset := range paths {
-		switch len(pathset) {
-		case 1:
-			blob, _, err := t.accountTrie.GetNode(pathset[0])
-			if err != nil {
-				t.logger.Info("Error handling req", "error", err)
-				break
-			}
-			nodes = append(nodes, blob)
-		default:
-			account := t.storageTries[(common.BytesToHash(pathset[0]))]
-			for _, path := range pathset[1:] {
-				blob, _, err := account.GetNode(path)
-				if err != nil {
-					t.logger.Info("Error handling req", "error", err)
-					break
-				}
-				nodes = append(nodes, blob)
-			}
-		}
-	}
-	t.remote.OnTrieNodes(t, requestId, nodes)
-	return nil
-}
-
 // defaultAccountRequestHandler is a well-behaving handler for AccountRangeRequests
 func defaultAccountRequestHandler(t *testPeer, id uint64, root common.Hash, origin common.Hash, limit common.Hash, cap int) error {
 	keys, vals, proofs := createAccountRequestResponse(t, root, origin, limit, cap)
@@ -460,15 +420,6 @@ func emptyRequestAccountRangeFn(t *testPeer, requestId uint64, root common.Hash,
 }
 
 func nonResponsiveRequestAccountRangeFn(t *testPeer, requestId uint64, root common.Hash, origin common.Hash, limit common.Hash, cap int) error {
-	return nil
-}
-
-func emptyTrieRequestHandler(t *testPeer, requestId uint64, root common.Hash, paths []TrieNodePathSet, cap int) error {
-	t.remote.OnTrieNodes(t, requestId, nil)
-	return nil
-}
-
-func nonResponsiveTrieRequestHandler(t *testPeer, requestId uint64, root common.Hash, paths []TrieNodePathSet, cap int) error {
 	return nil
 }
 
@@ -814,7 +765,7 @@ func testMultiSyncManyUseless(t *testing.T, scheme string) {
 	)
 	sourceAccountTrie, elems, storageTries, storageElems := makeAccountTrieWithStorage(scheme, 100, 3000, true, false, false)
 
-	mkSource := func(name string, noAccount, noStorage, noTrieNode bool) *testPeer {
+	mkSource := func(name string, noAccount, noStorage bool) *testPeer {
 		source := newTestPeer(name, t, term)
 		source.accountTrie = sourceAccountTrie.Copy()
 		source.accountValues = elems
@@ -827,18 +778,14 @@ func testMultiSyncManyUseless(t *testing.T, scheme string) {
 		if !noStorage {
 			source.storageRequestHandler = emptyStorageRequestHandler
 		}
-		if !noTrieNode {
-			source.trieRequestHandler = emptyTrieRequestHandler
-		}
 		return source
 	}
 
 	syncer := setupSyncer(
 		scheme,
-		mkSource("full", true, true, true),
-		mkSource("noAccounts", false, true, true),
-		mkSource("noStorage", true, false, true),
-		mkSource("noTrie", true, true, false),
+		mkSource("full", true, true),
+		mkSource("noAccounts", false, true),
+		mkSource("noStorage", true, false),
 	)
 	done := checkStall(t, term)
 	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
@@ -868,7 +815,7 @@ func testMultiSyncManyUselessWithLowTimeout(t *testing.T, scheme string) {
 	)
 	sourceAccountTrie, elems, storageTries, storageElems := makeAccountTrieWithStorage(scheme, 100, 3000, true, false, false)
 
-	mkSource := func(name string, noAccount, noStorage, noTrieNode bool) *testPeer {
+	mkSource := func(name string, noAccount, noStorage bool) *testPeer {
 		source := newTestPeer(name, t, term)
 		source.accountTrie = sourceAccountTrie.Copy()
 		source.accountValues = elems
@@ -881,18 +828,14 @@ func testMultiSyncManyUselessWithLowTimeout(t *testing.T, scheme string) {
 		if !noStorage {
 			source.storageRequestHandler = emptyStorageRequestHandler
 		}
-		if !noTrieNode {
-			source.trieRequestHandler = emptyTrieRequestHandler
-		}
 		return source
 	}
 
 	syncer := setupSyncer(
 		scheme,
-		mkSource("full", true, true, true),
-		mkSource("noAccounts", false, true, true),
-		mkSource("noStorage", true, false, true),
-		mkSource("noTrie", true, true, false),
+		mkSource("full", true, true),
+		mkSource("noAccounts", false, true),
+		mkSource("noStorage", true, false),
 	)
 	// We're setting the timeout to very low, to increase the chance of the timeout
 	// being triggered. This was previously a cause of panic, when a response
@@ -927,7 +870,7 @@ func testMultiSyncManyUnresponsive(t *testing.T, scheme string) {
 	)
 	sourceAccountTrie, elems, storageTries, storageElems := makeAccountTrieWithStorage(scheme, 100, 3000, true, false, false)
 
-	mkSource := func(name string, noAccount, noStorage, noTrieNode bool) *testPeer {
+	mkSource := func(name string, noAccount, noStorage bool) *testPeer {
 		source := newTestPeer(name, t, term)
 		source.accountTrie = sourceAccountTrie.Copy()
 		source.accountValues = elems
@@ -940,18 +883,14 @@ func testMultiSyncManyUnresponsive(t *testing.T, scheme string) {
 		if !noStorage {
 			source.storageRequestHandler = nonResponsiveStorageRequestHandler
 		}
-		if !noTrieNode {
-			source.trieRequestHandler = nonResponsiveTrieRequestHandler
-		}
 		return source
 	}
 
 	syncer := setupSyncer(
 		scheme,
-		mkSource("full", true, true, true),
-		mkSource("noAccounts", false, true, true),
-		mkSource("noStorage", true, false, true),
-		mkSource("noTrie", true, true, false),
+		mkSource("full", true, true),
+		mkSource("noAccounts", false, true),
+		mkSource("noStorage", true, false),
 	)
 	// We're setting the timeout to very low, to make the test run a bit faster
 	syncer.rates.OverrideTTLLimit = time.Millisecond
@@ -1879,55 +1818,6 @@ func verifyTrie(scheme string, db ethdb.KeyValueStore, root common.Hash, t *test
 	t.Logf("accounts: %d, slots: %d", accounts, slots)
 }
 
-// TestSyncAccountPerformance tests how efficient the snap algo is at minimizing
-// state healing
-func TestSyncAccountPerformance(t *testing.T) {
-	// These tests must not run in parallel: they modify the
-	// global var accountConcurrency
-	// t.Parallel()
-	testSyncAccountPerformance(t, rawdb.HashScheme)
-	testSyncAccountPerformance(t, rawdb.PathScheme)
-}
-
-func testSyncAccountPerformance(t *testing.T, scheme string) {
-	// Set the account concurrency to 1. This _should_ result in the
-	// range root to become correct, and there should be no healing needed
-	defer func(old int) { accountConcurrency = old }(accountConcurrency)
-	accountConcurrency = 1
-
-	var (
-		once   sync.Once
-		cancel = make(chan struct{})
-		term   = func() {
-			once.Do(func() {
-				close(cancel)
-			})
-		}
-	)
-	nodeScheme, sourceAccountTrie, elems := makeAccountTrieNoStorage(100, scheme)
-
-	mkSource := func(name string) *testPeer {
-		source := newTestPeer(name, t, term)
-		source.accountTrie = sourceAccountTrie.Copy()
-		source.accountValues = elems
-		return source
-	}
-	src := mkSource("source")
-	syncer := setupSyncer(nodeScheme, src)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
-		t.Fatalf("sync failed: %v", err)
-	}
-	verifyTrie(scheme, syncer.db, sourceAccountTrie.Hash(), t)
-	// The trie root will always be requested, since it is added when the snap
-	// sync cycle starts. When popping the queue, we do not look it up again.
-	// Doing so would bring this number down to zero in this artificial testcase,
-	// but only add extra IO for no reason in practice.
-	if have, want := src.nTrienodeRequests, 1; have != want {
-		fmt.Print(src.Stats())
-		t.Errorf("trie node heal requests wrong, want %d, have %d", want, have)
-	}
-}
-
 func TestSlotEstimation(t *testing.T) {
 	for i, tc := range []struct {
 		last  common.Hash
@@ -1975,6 +1865,75 @@ func TestSlotEstimation(t *testing.T) {
 		if want := tc.want; have != want {
 			t.Errorf("test %d: have %d want %d", i, have, want)
 		}
+	}
+}
+
+// TestPivotMoveDetection verifies that when the syncer is restarted with a
+// different root (simulating the downloader's cancel+restart on pivot move),
+// download() returns errPivotStale immediately.
+func TestPivotMoveDetection(t *testing.T) {
+	t.Parallel()
+
+	rootA := common.HexToHash("0xaaaa")
+	rootB := common.HexToHash("0xbbbb")
+
+	db := rawdb.NewMemoryDatabase()
+	syncer := NewSyncer(db, rawdb.HashScheme)
+
+	// Simulate a previous sync run against rootA with some pending tasks
+	syncer.root = rootA
+	syncer.tasks = []*accountTask{
+		{Next: common.Hash{}, Last: common.MaxHash, SubTasks: make(map[common.Hash][]*storageTask), stateCompleted: make(map[common.Hash]struct{})},
+	}
+	syncer.saveSyncStatus()
+
+	// Simulate downloader restarting us with rootB (as Sync() would do)
+	syncer.root = rootB
+	syncer.previousRoot = rootB // Sync() sets this as default
+	syncer.loadSyncStatus()     // Overwrites previousRoot with persisted rootA
+
+	if syncer.previousRoot != rootA {
+		t.Fatalf("previousRoot mismatch: got %v, want %v", syncer.previousRoot, rootA)
+	}
+	if syncer.root != rootB {
+		t.Fatalf("root mismatch: got %v, want %v", syncer.root, rootB)
+	}
+	// download() should detect the mismatch and return errPivotStale
+	cancel := make(chan struct{})
+	err := syncer.download(cancel)
+	if err != errPivotStale {
+		t.Fatalf("expected errPivotStale, got %v", err)
+	}
+}
+
+// TestNoPivotMoveOnSameRoot verifies that when the syncer is restarted with
+// the same root, download() does not return errPivotStale.
+func TestNoPivotMoveOnSameRoot(t *testing.T) {
+	t.Parallel()
+
+	rootA := common.HexToHash("0xaaaa")
+
+	db := rawdb.NewMemoryDatabase()
+	syncer := NewSyncer(db, rawdb.HashScheme)
+
+	// Simulate a previous sync run against rootA
+	syncer.root = rootA
+	syncer.tasks = []*accountTask{
+		{Next: common.Hash{}, Last: common.MaxHash, SubTasks: make(map[common.Hash][]*storageTask), stateCompleted: make(map[common.Hash]struct{})},
+	}
+	syncer.saveSyncStatus()
+
+	// Simulate restart with the same root
+	syncer.root = rootA
+	syncer.previousRoot = rootA
+	syncer.loadSyncStatus()
+
+	if syncer.previousRoot != rootA {
+		t.Fatalf("previousRoot mismatch: got %v, want %v", syncer.previousRoot, rootA)
+	}
+	// previousRoot == root, so no pivot move detected
+	if syncer.previousRoot != syncer.root {
+		t.Fatalf("expected previousRoot == root, got %v != %v", syncer.previousRoot, syncer.root)
 	}
 }
 

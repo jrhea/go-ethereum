@@ -276,7 +276,7 @@ func (d *Downloader) Progress() ethereum.SyncProgress {
 	default:
 		log.Error("Unknown downloader mode", "mode", mode)
 	}
-	progress, pending := d.SnapSyncer.Progress()
+	progress := d.SnapSyncer.Progress()
 
 	return ethereum.SyncProgress{
 		StartingBlock:       d.syncStatsChainOrigin,
@@ -288,12 +288,6 @@ func (d *Downloader) Progress() ethereum.SyncProgress {
 		SyncedBytecodeBytes: uint64(progress.BytecodeBytes),
 		SyncedStorage:       progress.StorageSynced,
 		SyncedStorageBytes:  uint64(progress.StorageBytes),
-		HealedTrienodes:     progress.TrienodeHealSynced,
-		HealedTrienodeBytes: uint64(progress.TrienodeHealBytes),
-		HealedBytecodes:     progress.BytecodeHealSynced,
-		HealedBytecodeBytes: uint64(progress.BytecodeHealBytes),
-		HealingTrienodes:    pending.TrienodeHeal,
-		HealingBytecode:     pending.BytecodeHeal,
 	}
 }
 
@@ -1086,7 +1080,9 @@ func (d *Downloader) DeliverSnapPacket(peer *snap.Peer, packet snap.Packet) erro
 		return d.SnapSyncer.OnByteCodes(peer, packet.ID, packet.Codes)
 
 	case *snap.TrieNodesPacket:
-		return d.SnapSyncer.OnTrieNodes(peer, packet.ID, packet.Nodes)
+		// Snap/2 no longer requests trie nodes; ignore stale responses
+		// TODO JR: Delete this
+		return nil
 
 	case *snap.AccessListsPacket:
 		return d.SnapSyncer.OnAccessLists(peer, packet.ID, packet.AccessLists)
