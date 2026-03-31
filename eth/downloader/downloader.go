@@ -1088,6 +1088,9 @@ func (d *Downloader) DeliverSnapPacket(peer *snap.Peer, packet snap.Packet) erro
 	case *snap.TrieNodesPacket:
 		return d.SnapSyncer.OnTrieNodes(peer, packet.ID, packet.Nodes)
 
+	case *snap.AccessListsPacket:
+		return d.SnapSyncer.OnAccessLists(peer, packet.ID, packet.AccessLists)
+
 	default:
 		return fmt.Errorf("unexpected snap packet type: %T", packet)
 	}

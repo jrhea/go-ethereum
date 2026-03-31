@@ -375,6 +375,18 @@ func (dlp *downloadTesterPeer) RequestTrieNodes(id uint64, root common.Hash, cou
 	return nil
 }
 
+// RequestAccessLists fetches a batch of BALs by block hash.
+func (dlp *downloadTesterPeer) RequestAccessLists(id uint64, hashes []common.Hash, bytes int) error {
+	req := &snap.GetAccessListsPacket{
+		ID:     id,
+		Hashes: hashes,
+		Bytes:  uint64(bytes),
+	}
+	als := snap.ServiceGetAccessListsQuery(dlp.chain, req)
+	go dlp.dl.downloader.SnapSyncer.OnAccessLists(dlp, id, als)
+	return nil
+}
+
 // Log retrieves the peer's own contextual logger.
 func (dlp *downloadTesterPeer) Log() log.Logger {
 	return log.New("peer", dlp.id)

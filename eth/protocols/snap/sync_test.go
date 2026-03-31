@@ -119,10 +119,11 @@ func BenchmarkHashing(b *testing.B) {
 }
 
 type (
-	accountHandlerFunc func(t *testPeer, requestId uint64, root common.Hash, origin common.Hash, limit common.Hash, cap int) error
-	storageHandlerFunc func(t *testPeer, requestId uint64, root common.Hash, accounts []common.Hash, origin, limit []byte, max int) error
-	trieHandlerFunc    func(t *testPeer, requestId uint64, root common.Hash, paths []TrieNodePathSet, cap int) error
-	codeHandlerFunc    func(t *testPeer, id uint64, hashes []common.Hash, max int) error
+	accountHandlerFunc    func(t *testPeer, requestId uint64, root common.Hash, origin common.Hash, limit common.Hash, cap int) error
+	storageHandlerFunc    func(t *testPeer, requestId uint64, root common.Hash, accounts []common.Hash, origin, limit []byte, max int) error
+	trieHandlerFunc       func(t *testPeer, requestId uint64, root common.Hash, paths []TrieNodePathSet, cap int) error
+	codeHandlerFunc       func(t *testPeer, id uint64, hashes []common.Hash, max int) error
+	accessListHandlerFunc func(t *testPeer, id uint64, hashes []common.Hash, max int) error
 )
 
 type testPeer struct {
@@ -135,29 +136,32 @@ type testPeer struct {
 	storageTries  map[common.Hash]*trie.Trie
 	storageValues map[common.Hash][]*kv
 
-	accountRequestHandler accountHandlerFunc
-	storageRequestHandler storageHandlerFunc
-	trieRequestHandler    trieHandlerFunc
-	codeRequestHandler    codeHandlerFunc
-	term                  func()
+	accountRequestHandler    accountHandlerFunc
+	storageRequestHandler    storageHandlerFunc
+	trieRequestHandler       trieHandlerFunc
+	codeRequestHandler       codeHandlerFunc
+	accessListRequestHandler accessListHandlerFunc
+	term                     func()
 
 	// counters
-	nAccountRequests  int
-	nStorageRequests  int
-	nBytecodeRequests int
-	nTrienodeRequests int
+	nAccountRequests    int
+	nStorageRequests    int
+	nBytecodeRequests   int
+	nTrienodeRequests   int
+	nAccessListRequests int
 }
 
 func newTestPeer(id string, t *testing.T, term func()) *testPeer {
 	peer := &testPeer{
-		id:                    id,
-		test:                  t,
-		logger:                log.New("id", id),
-		accountRequestHandler: defaultAccountRequestHandler,
-		trieRequestHandler:    defaultTrieRequestHandler,
-		storageRequestHandler: defaultStorageRequestHandler,
-		codeRequestHandler:    defaultCodeRequestHandler,
-		term:                  term,
+		id:                       id,
+		test:                     t,
+		logger:                   log.New("id", id),
+		accountRequestHandler:    defaultAccountRequestHandler,
+		trieRequestHandler:       defaultTrieRequestHandler,
+		storageRequestHandler:    defaultStorageRequestHandler,
+		codeRequestHandler:       defaultCodeRequestHandler,
+		accessListRequestHandler: defaultAccessListRequestHandler,
+		term:                     term,
 	}
 	//stderrHandler := log.StreamHandler(os.Stderr, log.TerminalFormat(true))
 	//peer.logger.SetHandler(stderrHandler)
@@ -211,6 +215,13 @@ func (t *testPeer) RequestByteCodes(id uint64, hashes []common.Hash, bytes int) 
 	t.nBytecodeRequests++
 	t.logger.Trace("Fetching set of byte codes", "reqid", id, "hashes", len(hashes), "bytes", common.StorageSize(bytes))
 	go t.codeRequestHandler(t, id, hashes, bytes)
+	return nil
+}
+
+func (t *testPeer) RequestAccessLists(id uint64, hashes []common.Hash, bytes int) error {
+	t.nAccessListRequests++
+	t.logger.Trace("Fetching set of BALs", "reqid", id, "hashes", len(hashes), "bytes", common.StorageSize(bytes))
+	go t.accessListRequestHandler(t, id, hashes, bytes)
 	return nil
 }
 
@@ -305,6 +316,16 @@ func defaultCodeRequestHandler(t *testPeer, id uint64, hashes []common.Hash, max
 		bytecodes = append(bytecodes, getCodeByHash(h))
 	}
 	if err := t.remote.OnByteCodes(t, id, bytecodes); err != nil {
+		t.test.Errorf("Remote side rejected our delivery: %v", err)
+		t.term()
+	}
+	return nil
+}
+
+// defaultAccessListRequestHandler is a stub to satisfy the SyncPeer interface.
+// TODO JR: Finish in the next PR
+func defaultAccessListRequestHandler(t *testPeer, id uint64, hashes []common.Hash, max int) error {
+	if err := t.remote.OnAccessLists(t, id, nil); err != nil {
 		t.test.Errorf("Remote side rejected our delivery: %v", err)
 		t.term()
 	}

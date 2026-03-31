@@ -263,6 +263,22 @@ type trienodeHealResponse struct {
 	nodes  [][]byte      // Actual trie nodes to store into the database (nil = missing)
 }
 
+type accessListRequest struct {
+	peer    string                   // Peer to which this request is assigned
+	id      uint64                   // Request ID of this request
+	hashes  []common.Hash            // Block hashes corresponsing to requested BALs
+	time    time.Time                // Timestamp when the request was sent
+	timeout *time.Timer              // Timer to track the delivery timeout
+	deliver chan *accessListResponse // Channel to deliver successful response on
+	cancel  chan struct{}            // Channel to rtack sync cancellation
+	stale   chan struct{}            // Channel to signal the request was dropped
+}
+
+type accessListResponse struct {
+	req         *accessListRequest
+	accessLists []rlp.RawValue
+}
+
 // bytecodeHealRequest tracks a pending bytecode request to ensure responses are to
 // actual requests and to validate any security constraints.
 //
@@ -426,6 +442,9 @@ type SyncPeer interface {
 	// a specific state trie.
 	RequestTrieNodes(id uint64, root common.Hash, count int, paths []TrieNodePathSet, bytes int) error
 
+	// RequestAccessLists fetches a batch of BALs by block hash.
+	RequestAccessLists(id uint64, hashes []common.Hash, bytes int) error
+
 	// Log retrieves the peer's own contextual logger.
 	Log() log.Logger
 }
@@ -457,14 +476,16 @@ type Syncer struct {
 	rates    *msgrate.Trackers   // Message throughput rates for peers
 
 	// Request tracking during syncing phase
-	statelessPeers map[string]struct{} // Peers that failed to deliver state data
-	accountIdlers  map[string]struct{} // Peers that aren't serving account requests
-	bytecodeIdlers map[string]struct{} // Peers that aren't serving bytecode requests
-	storageIdlers  map[string]struct{} // Peers that aren't serving storage requests
+	statelessPeers   map[string]struct{} // Peers that failed to deliver state data
+	accountIdlers    map[string]struct{} // Peers that aren't serving account requests
+	bytecodeIdlers   map[string]struct{} // Peers that aren't serving bytecode requests
+	storageIdlers    map[string]struct{} // Peers that aren't serving storage requests
+	accessListIdlers map[string]struct{} // Peers that aren't serving access list requests
 
-	accountReqs  map[uint64]*accountRequest  // Account requests currently running
-	bytecodeReqs map[uint64]*bytecodeRequest // Bytecode requests currently running
-	storageReqs  map[uint64]*storageRequest  // Storage requests currently running
+	accountReqs    map[uint64]*accountRequest    // Account requests currently running
+	bytecodeReqs   map[uint64]*bytecodeRequest   // Bytecode requests currently running
+	storageReqs    map[uint64]*storageRequest    // Storage requests currently running
+	accessListReqs map[uint64]*accessListRequest // Access list requests currently running
 
 	accountSynced  uint64             // Number of accounts downloaded
 	accountBytes   common.StorageSize // Number of account trie bytes persisted to disk
@@ -526,11 +547,13 @@ func NewSyncer(db ethdb.KeyValueStore, scheme string) *Syncer {
 
 		accountIdlers:  make(map[string]struct{}),
 		storageIdlers:  make(map[string]struct{}),
-		bytecodeIdlers: make(map[string]struct{}),
+		bytecodeIdlers:   make(map[string]struct{}),
+		accessListIdlers: make(map[string]struct{}),
 
-		accountReqs:  make(map[uint64]*accountRequest),
-		storageReqs:  make(map[uint64]*storageRequest),
-		bytecodeReqs: make(map[uint64]*bytecodeRequest),
+		accountReqs:    make(map[uint64]*accountRequest),
+		storageReqs:    make(map[uint64]*storageRequest),
+		bytecodeReqs:   make(map[uint64]*bytecodeRequest),
+		accessListReqs: make(map[uint64]*accessListRequest),
 
 		trienodeHealIdlers: make(map[string]struct{}),
 		bytecodeHealIdlers: make(map[string]struct{}),
@@ -1855,6 +1878,13 @@ func (s *Syncer) revertTrienodeHealRequest(req *trienodeHealRequest) {
 	}
 }
 
+// scheduleRevertAccessListRequest cleans up a failed access list request,
+// making the hashes available for rescheduling.
+func (s *Syncer) scheduleRevertAccessListRequest(req *accessListRequest) {
+	// TODO JR: implement rescheduling logic
+	log.Debug("Reverting access list request", "peer", req.peer)
+}
+
 // scheduleRevertBytecodeHealRequest asks the event loop to clean up a bytecode heal
 // request and return all failed retrieval tasks to the scheduler for reassignment.
 func (s *Syncer) scheduleRevertBytecodeHealRequest(req *bytecodeHealRequest) {
@@ -2977,6 +3007,76 @@ func (s *Syncer) OnTrieNodes(peer SyncPeer, id uint64, trienodes [][]byte) error
 		task:   req.task,
 		hashes: req.hashes,
 		nodes:  nodes,
+	}
+	select {
+	case req.deliver <- response:
+	case <-req.cancel:
+	case <-req.stale:
+	}
+	return nil
+}
+
+// OnAccessLists is a callback method to invoke when a batch of access lists
+// are received from a remote peer.
+func (s *Syncer) OnAccessLists(peer SyncPeer, id uint64, accessLists []rlp.RawValue) error {
+	var size common.StorageSize
+	for _, bal := range accessLists {
+		size += common.StorageSize(len(bal))
+	}
+	logger := peer.Log().New("reqid", id)
+	logger.Trace("Delivering set of BALs", "count", len(accessLists), "bytes", size)
+
+	// Whether or not the response is valid, we can mark the peer as idle and
+	// notify the scheduler to assign a new task. If the response is invalid,
+	// we'll drop the peer in a bit.
+	defer func() {
+		s.lock.Lock()
+		defer s.lock.Unlock()
+		if _, ok := s.peers[peer.ID()]; ok {
+			s.accessListIdlers[peer.ID()] = struct{}{}
+		}
+		select {
+		case s.update <- struct{}{}:
+		default:
+		}
+	}()
+	s.lock.Lock()
+
+	// Ensure the response is for a valid request
+	req, ok := s.accessListReqs[id]
+	if !ok {
+		// Request stale, perhaps the peer timed out but came through in the end
+		logger.Warn("Unexpected access list packet")
+		s.lock.Unlock()
+		return nil
+	}
+	delete(s.accessListReqs, id)
+	s.rates.Update(peer.ID(), AccessListsMsg, time.Since(req.time), len(accessLists))
+
+	// Clean up the request timeout timer
+	if !req.timeout.Stop() {
+		// The timeout is already triggered, and this request will be reverted+rescheduled
+		s.lock.Unlock()
+		return nil
+	}
+
+	// Response is valid, but check if peer is signalling that it does not have
+	// the requested data.
+	if len(accessLists) == 0 {
+		logger.Debug("Peer rejected access list request")
+		s.statelessPeers[peer.ID()] = struct{}{}
+		s.lock.Unlock()
+
+		// Signal this request as failed, and ready for rescheduling
+		s.scheduleRevertAccessListRequest(req)
+		return nil
+	}
+	s.lock.Unlock()
+
+	// Response validated, send it to the scheduler for filling.
+	response := &accessListResponse{
+		req:         req,
+		accessLists: accessLists,
 	}
 	select {
 	case req.deliver <- response:
