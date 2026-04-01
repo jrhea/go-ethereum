@@ -61,6 +61,16 @@ const (
 	// size should be maxRequestSize / 24K. Assuming that most contracts do not
 	// come close to that, requesting 4x should be a good approximation.
 	maxCodeRequestCount = maxRequestSize / (24 * 1024) * 4
+
+	// maxAccessListRequestCount is the maximum number of block access lists to
+	// request in a single query. BALs average ~72 KiB compressed (per EIP-7928),
+	// and EIP-8189 recommends a 2 MiB response soft limit, so we target ~28
+	// blocks per request to avoid server-side truncation.
+	//
+	// NOTE: If the gas limit is raised significantly, this number may need to be adjusted
+	// to avoid server-side truncation and re-requesting. It is currently based on
+	// the assumption that the gas limit is 60M.
+	maxAccessListRequestCount = 28
 )
 
 var (
@@ -196,11 +206,12 @@ type storageResponse struct {
 type accessListRequest struct {
 	peer    string                   // Peer to which this request is assigned
 	id      uint64                   // Request ID of this request
-	hashes  []common.Hash            // Block hashes corresponsing to requested BALs
+	hashes  []common.Hash            // Block hashes corresponding to requested BALs
 	time    time.Time                // Timestamp when the request was sent
 	timeout *time.Timer              // Timer to track the delivery timeout
 	deliver chan *accessListResponse // Channel to deliver successful response on
-	cancel  chan struct{}            // Channel to rtack sync cancellation
+	revert  chan *accessListRequest  // Channel to deliver request failure on
+	cancel  chan struct{}            // Channel to track sync cancellation
 	stale   chan struct{}            // Channel to signal the request was dropped
 }
 
@@ -624,6 +635,153 @@ func (s *Syncer) catchUp(cancel chan struct{}) error {
 	return errors.New("catch-up not yet implemented")
 }
 
+// fetchAccessLists fetches BALs for the given block hashes from
+// remote peers. It runs its own event loop to assign requests
+// to idle peers and process responses asynchronously. Results are returned in
+// the same order as the input hashes.
+func (s *Syncer) fetchAccessLists(hashes []common.Hash, cancel chan struct{}) ([]rlp.RawValue, error) {
+	log.Debug("Fetching access lists for catch-up", "blocks", len(hashes))
+
+	// Subscribe to peer events
+	peerJoin := make(chan string, 16)
+	peerJoinSub := s.peerJoin.Subscribe(peerJoin)
+	defer peerJoinSub.Unsubscribe()
+	peerDrop := make(chan string, 16)
+	peerDropSub := s.peerDrop.Subscribe(peerDrop)
+	defer peerDropSub.Unsubscribe()
+
+	// Track which hashes still need fetching and collected results
+	pending := make(map[common.Hash]struct{}, len(hashes))
+	for _, h := range hashes {
+		pending[h] = struct{}{}
+	}
+	fetched := make(map[common.Hash]rlp.RawValue, len(hashes))
+
+	// Create ephemeral channels for this fetch cycle
+	var (
+		accessListReqFails = make(chan *accessListRequest)
+		accessListResps    = make(chan *accessListResponse)
+	)
+	for len(pending) > 0 {
+		// Assign access list retrieval tasks to idle peers
+		s.assignAccessListTasks(pending, accessListResps, accessListReqFails, cancel)
+
+		// Wait for something to happen
+		select {
+		case <-s.update:
+			// Something happened (new peer, delivery, timeout), recheck
+		case <-peerJoin:
+			// A new peer joined, try to assign it work
+		case id := <-peerDrop:
+			s.revertRequests(id)
+		case <-cancel:
+			return nil, ErrCancelled
+
+		case req := <-accessListReqFails:
+			s.revertAccessListRequest(req)
+			for _, h := range req.hashes {
+				pending[h] = struct{}{}
+			}
+		case res := <-accessListResps:
+			s.processAccessListResponse(res, pending, fetched)
+		}
+	}
+	// Assemble results in input order
+	results := make([]rlp.RawValue, len(hashes))
+	for i, h := range hashes {
+		results[i] = fetched[h]
+	}
+	return results, nil
+}
+
+// assignAccessListTasks attempts to assign access list fetch requests to idle
+// peers for any hashes still in pending.
+func (s *Syncer) assignAccessListTasks(pending map[common.Hash]struct{}, success chan *accessListResponse, fail chan *accessListRequest, cancel chan struct{}) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	idlers := s.sortIdlePeers(s.accessListIdlers, AccessListsMsg)
+
+	// Iterate over pending hashes and assign to idle peers
+	for len(idlers.ids) > 0 && len(pending) > 0 {
+		var (
+			idle = idlers.ids[0]
+			peer = s.peers[idle]
+			cap  = idlers.caps[0]
+		)
+		idlers.ids, idlers.caps = idlers.ids[1:], idlers.caps[1:]
+
+		// Generate a unique request ID
+		var reqid uint64
+		for {
+			reqid = uint64(rand.Int63())
+			if reqid == 0 {
+				continue
+			}
+			if _, ok := s.accessListReqs[reqid]; ok {
+				continue
+			}
+			break
+		}
+
+		// Collect hashes to fetch, capped by peer capacity and the
+		// EIP-8189 2 MiB response soft limit (~72 KiB/BAL → 28 blocks).
+		if cap > maxAccessListRequestCount {
+			cap = maxAccessListRequestCount
+		}
+		batch := make([]common.Hash, 0, cap)
+		for h := range pending {
+			delete(pending, h)
+			batch = append(batch, h)
+			if len(batch) >= cap {
+				break
+			}
+		}
+		req := &accessListRequest{
+			peer:    idle,
+			id:      reqid,
+			hashes:  batch,
+			time:    time.Now(),
+			deliver: success,
+			revert:  fail,
+			cancel:  cancel,
+			stale:   make(chan struct{}),
+		}
+		req.timeout = time.AfterFunc(s.rates.TargetTimeout(), func() {
+			peer.Log().Debug("Access list request timed out", "reqid", reqid)
+			s.rates.Update(idle, AccessListsMsg, 0, 0)
+			s.scheduleRevertAccessListRequest(req)
+		})
+		s.accessListReqs[reqid] = req
+		delete(s.accessListIdlers, idle)
+
+		s.pend.Add(1)
+		go func() {
+			defer s.pend.Done()
+
+			// Attempt to send the remote request and revert if it fails
+			if err := peer.RequestAccessLists(reqid, batch, maxRequestSize); err != nil {
+				log.Debug("Failed to request access lists", "err", err)
+				s.scheduleRevertAccessListRequest(req)
+			}
+		}()
+	}
+}
+
+// processAccessListResponse handles a successful access list response by
+// matching results to pending hashes and storing them.
+func (s *Syncer) processAccessListResponse(res *accessListResponse, pending map[common.Hash]struct{}, fetched map[common.Hash]rlp.RawValue) {
+	// Each response entry corresponds to the requested hash at the same index
+	for i, raw := range res.accessLists {
+		if i >= len(res.req.hashes) {
+			break
+		}
+		h := res.req.hashes[i]
+		fetched[h] = raw
+		delete(pending, h)
+	}
+	// If the response was short, the remaining hashes stay in pending for retry
+}
+
 // rebuildTrie runs the trie rebuild from consistent flat
 // state. It builds storage tries, account trie, and verifies the state root.
 func (s *Syncer) rebuildTrie(root common.Hash, cancel chan struct{}) error {
@@ -799,23 +957,10 @@ func (s *Syncer) assignAccountTasks(success chan *accountResponse, fail chan *ac
 	defer s.lock.Unlock()
 
 	// Sort the peers by download capacity to use faster ones if many available
-	idlers := &capacitySort{
-		ids:  make([]string, 0, len(s.accountIdlers)),
-		caps: make([]int, 0, len(s.accountIdlers)),
-	}
-	targetTTL := s.rates.TargetTimeout()
-	for id := range s.accountIdlers {
-		if _, ok := s.statelessPeers[id]; ok {
-			continue
-		}
-		idlers.ids = append(idlers.ids, id)
-		idlers.caps = append(idlers.caps, s.rates.Capacity(id, AccountRangeMsg, targetTTL))
-	}
+	idlers := s.sortIdlePeers(s.accountIdlers, AccountRangeMsg)
 	if len(idlers.ids) == 0 {
 		return
 	}
-	sort.Sort(sort.Reverse(idlers))
-
 	// Iterate over all the tasks and try to find a pending one
 	for _, task := range s.tasks {
 		// Skip any tasks already filling
@@ -895,24 +1040,10 @@ func (s *Syncer) assignBytecodeTasks(success chan *bytecodeResponse, fail chan *
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	// Sort the peers by download capacity to use faster ones if many available
-	idlers := &capacitySort{
-		ids:  make([]string, 0, len(s.bytecodeIdlers)),
-		caps: make([]int, 0, len(s.bytecodeIdlers)),
-	}
-	targetTTL := s.rates.TargetTimeout()
-	for id := range s.bytecodeIdlers {
-		if _, ok := s.statelessPeers[id]; ok {
-			continue
-		}
-		idlers.ids = append(idlers.ids, id)
-		idlers.caps = append(idlers.caps, s.rates.Capacity(id, ByteCodesMsg, targetTTL))
-	}
+	idlers := s.sortIdlePeers(s.bytecodeIdlers, ByteCodesMsg)
 	if len(idlers.ids) == 0 {
 		return
 	}
-	sort.Sort(sort.Reverse(idlers))
-
 	// Iterate over all the tasks and try to find a pending one
 	for _, task := range s.tasks {
 		// Skip any tasks not in the bytecode retrieval phase
@@ -998,24 +1129,10 @@ func (s *Syncer) assignStorageTasks(success chan *storageResponse, fail chan *st
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
-	// Sort the peers by download capacity to use faster ones if many available
-	idlers := &capacitySort{
-		ids:  make([]string, 0, len(s.storageIdlers)),
-		caps: make([]int, 0, len(s.storageIdlers)),
-	}
-	targetTTL := s.rates.TargetTimeout()
-	for id := range s.storageIdlers {
-		if _, ok := s.statelessPeers[id]; ok {
-			continue
-		}
-		idlers.ids = append(idlers.ids, id)
-		idlers.caps = append(idlers.caps, s.rates.Capacity(id, StorageRangesMsg, targetTTL))
-	}
+	idlers := s.sortIdlePeers(s.storageIdlers, StorageRangesMsg)
 	if len(idlers.ids) == 0 {
 		return
 	}
-	sort.Sort(sort.Reverse(idlers))
-
 	// Iterate over all the tasks and try to find a pending one
 	for _, task := range s.tasks {
 		// Skip any tasks not in the storage retrieval phase
@@ -1172,6 +1289,12 @@ func (s *Syncer) revertRequests(peer string) {
 			storageReqs = append(storageReqs, req)
 		}
 	}
+	var accessListReqs []*accessListRequest
+	for _, req := range s.accessListReqs {
+		if req.peer == peer {
+			accessListReqs = append(accessListReqs, req)
+		}
+	}
 	s.lock.Unlock()
 
 	// Revert all the requests matching the peer
@@ -1183,6 +1306,9 @@ func (s *Syncer) revertRequests(peer string) {
 	}
 	for _, req := range storageReqs {
 		s.revertStorageRequest(req)
+	}
+	for _, req := range accessListReqs {
+		s.revertAccessListRequest(req)
 	}
 }
 
@@ -1325,11 +1451,45 @@ func (s *Syncer) revertStorageRequest(req *storageRequest) {
 	}
 }
 
-// scheduleRevertAccessListRequest cleans up a failed access list request,
-// making the hashes available for rescheduling.
+// scheduleRevertAccessListRequest asks the event loop to clean up an access
+// list request and return all failed retrieval tasks for reassignment.
+//
+// Note, this needs to run on the event runloop thread to reschedule to idle
+// peers. On peer threads, use scheduleRevertAccessListRequest.
 func (s *Syncer) scheduleRevertAccessListRequest(req *accessListRequest) {
-	// TODO JR: implement rescheduling logic
+	select {
+	case req.revert <- req:
+		// Sync event loop notified
+	case <-req.cancel:
+		// Sync cycle got cancelled
+	case <-req.stale:
+		// Request already reverted
+	}
+}
+
+// revertAccessListRequest cleans up an access list request and returns all
+// failed retrieval tasks to the scheduler for reassignment.
+func (s *Syncer) revertAccessListRequest(req *accessListRequest) {
 	log.Debug("Reverting access list request", "peer", req.peer)
+	select {
+	case <-req.stale:
+		log.Trace("Access list request already reverted", "peer", req.peer, "reqid", req.id)
+		return
+	default:
+	}
+	close(req.stale)
+
+	// Remove the request from the tracked set and restore the peer to the
+	// idle pool so it can be reassigned work (skip if peer already left).
+	s.lock.Lock()
+	delete(s.accessListReqs, req.id)
+	if _, ok := s.peers[req.peer]; ok {
+		s.accessListIdlers[req.peer] = struct{}{}
+	}
+	s.lock.Unlock()
+
+	req.timeout.Stop()
+	// Hashes remain in the pending map and will be retried on the next loop iteration
 }
 
 // processAccountResponse integrates an already validated account range response
@@ -2207,6 +2367,28 @@ func estimateRemainingSlots(hashes int, last common.Hash) (uint64, error) {
 		return 0, errors.New("too few slots for estimation")
 	}
 	return space.Uint64() - uint64(hashes), nil
+}
+
+// sortIdlePeers builds a list of idle peers sorted by download capacity
+// (highest first), filtering out stateless peers. Must be called with s.lock held.
+func (s *Syncer) sortIdlePeers(idlerSet map[string]struct{}, msgCode uint64) *capacitySort {
+	idlers := &capacitySort{
+		ids:  make([]string, 0, len(idlerSet)),
+		caps: make([]int, 0, len(idlerSet)),
+	}
+	targetTTL := s.rates.TargetTimeout()
+	for id := range idlerSet {
+		if _, ok := s.statelessPeers[id]; ok {
+			continue
+		}
+		idlers.ids = append(idlers.ids, id)
+		idlers.caps = append(idlers.caps, s.rates.Capacity(id, msgCode, targetTTL))
+	}
+	if len(idlers.ids) == 0 {
+		return idlers
+	}
+	sort.Sort(sort.Reverse(idlers))
+	return idlers
 }
 
 // capacitySort implements the Sort interface, allowing sorting by peer message
