@@ -25,12 +25,14 @@ import (
 	mrand "math/rand"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/types/bal"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/crypto/keccak"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -134,6 +136,7 @@ type testPeer struct {
 	accountValues []*kv
 	storageTries  map[common.Hash]*trie.Trie
 	storageValues map[common.Hash][]*kv
+	accessLists   map[common.Hash]rlp.RawValue // block hash -> RLP-encoded BAL
 
 	accountRequestHandler    accountHandlerFunc
 	storageRequestHandler    storageHandlerFunc
@@ -282,10 +285,18 @@ func defaultCodeRequestHandler(t *testPeer, id uint64, hashes []common.Hash, max
 	return nil
 }
 
-// defaultAccessListRequestHandler is a stub to satisfy the SyncPeer interface.
-// TODO JR: Finish in the next PR
+// defaultAccessListRequestHandler serves BALs from the peer's accessLists map.
+// If the peer has no BAL data, it returns empty (peer rejection).
 func defaultAccessListRequestHandler(t *testPeer, id uint64, hashes []common.Hash, max int) error {
-	if err := t.remote.OnAccessLists(t, id, nil); err != nil {
+	var results []rlp.RawValue
+	if t.accessLists != nil {
+		for _, h := range hashes {
+			if raw, ok := t.accessLists[h]; ok {
+				results = append(results, raw)
+			}
+		}
+	}
+	if err := t.remote.OnAccessLists(t, id, results); err != nil {
 		t.test.Errorf("Remote side rejected our delivery: %v", err)
 		t.term()
 	}
@@ -1934,6 +1945,363 @@ func TestNoPivotMoveOnSameRoot(t *testing.T) {
 	// previousRoot == root, so no pivot move detected
 	if syncer.previousRoot != syncer.root {
 		t.Fatalf("expected previousRoot == root, got %v != %v", syncer.previousRoot, syncer.root)
+	}
+}
+
+// TestFlatStateDownload verifies that download() writes flat state to disk
+// and makes no trie node requests.
+func TestFlatStateDownload(t *testing.T) {
+	t.Parallel()
+	testFlatStateDownload(t, rawdb.HashScheme)
+	testFlatStateDownload(t, rawdb.PathScheme)
+}
+
+func testFlatStateDownload(t *testing.T, scheme string) {
+	var (
+		once   sync.Once
+		cancel = make(chan struct{})
+		term   = func() {
+			once.Do(func() {
+				close(cancel)
+			})
+		}
+	)
+	nodeScheme, sourceAccountTrie, elems := makeAccountTrieNoStorage(100, scheme)
+	mkSource := func(name string) *testPeer {
+		source := newTestPeer(name, t, term)
+		source.accountTrie = sourceAccountTrie.Copy()
+		source.accountValues = elems
+		return source
+	}
+	syncer := setupSyncer(nodeScheme, mkSource("source"))
+
+	// Call download() directly to avoid rebuildTrie
+	syncer.root = sourceAccountTrie.Hash()
+	syncer.previousRoot = syncer.root // No pivot move
+	syncer.loadSyncStatus()
+	if err := syncer.download(cancel); err != nil {
+		t.Fatalf("download failed: %v", err)
+	}
+
+	// Verify flat state was written
+	for _, entry := range elems {
+		hash := common.BytesToHash(entry.k)
+		data := rawdb.ReadAccountSnapshot(syncer.db, hash)
+		if len(data) == 0 {
+			t.Errorf("missing account snapshot for %x", hash)
+		}
+	}
+}
+
+// TestInterruptedDownloadRecovery verifies that partially completed download
+// state is persisted and resumed on restart.
+func TestInterruptedDownloadRecovery(t *testing.T) {
+	t.Parallel()
+	testInterruptedDownloadRecovery(t, rawdb.HashScheme)
+	testInterruptedDownloadRecovery(t, rawdb.PathScheme)
+}
+
+func testInterruptedDownloadRecovery(t *testing.T, scheme string) {
+	nodeScheme, sourceAccountTrie, elems := makeAccountTrieNoStorage(100, scheme)
+	root := sourceAccountTrie.Hash()
+
+	// Cancel after exactly 2 account range responses, guaranteeing partial
+	// completion without any timing dependency.
+	var (
+		once1     sync.Once
+		cancel1   = make(chan struct{})
+		term1     = func() { once1.Do(func() { close(cancel1) }) }
+		responses atomic.Int32
+	)
+	cancelAfterHandler := func(tp *testPeer, id uint64, root common.Hash, origin common.Hash, limit common.Hash, cap int) error {
+		if responses.Add(1) > 2 {
+			term1()
+			return nil
+		}
+		return defaultAccountRequestHandler(tp, id, root, origin, limit, cap)
+	}
+	db := rawdb.NewMemoryDatabase()
+	syncer1 := NewSyncer(db, nodeScheme)
+	src1 := newTestPeer("source1", t, term1)
+	src1.accountTrie = sourceAccountTrie.Copy()
+	src1.accountValues = elems
+	src1.accountRequestHandler = cancelAfterHandler
+	syncer1.Register(src1)
+	src1.remote = syncer1
+	syncer1.root = root
+	syncer1.previousRoot = root
+	syncer1.loadSyncStatus()
+	syncer1.download(cancel1)
+
+	// Save progress
+	for _, task := range syncer1.tasks {
+		syncer1.forwardAccountTask(task)
+	}
+	syncer1.cleanAccountTasks()
+	syncer1.saveSyncStatus()
+
+	// Count how many accounts were downloaded in the first run
+	firstRunCount := 0
+	for _, entry := range elems {
+		if data := rawdb.ReadAccountSnapshot(db, common.BytesToHash(entry.k)); len(data) > 0 {
+			firstRunCount++
+		}
+	}
+	if firstRunCount == 0 {
+		t.Fatal("first run should have downloaded some accounts")
+	}
+	if firstRunCount == len(elems) {
+		t.Fatal("first run should not have downloaded everything")
+	}
+
+	// Second run: resume with same root, should complete the download
+	var (
+		once2   sync.Once
+		cancel2 = make(chan struct{})
+		term2   = func() { once2.Do(func() { close(cancel2) }) }
+	)
+	syncer2 := NewSyncer(db, nodeScheme)
+	src2 := newTestPeer("source2", t, term2)
+	src2.accountTrie = sourceAccountTrie.Copy()
+	src2.accountValues = elems
+	syncer2.Register(src2)
+	src2.remote = syncer2
+	syncer2.root = root
+	syncer2.previousRoot = root
+	syncer2.loadSyncStatus()
+	if err := syncer2.download(cancel2); err != nil {
+		t.Fatalf("resumed download failed: %v", err)
+	}
+
+	// Verify all accounts are now present
+	for _, entry := range elems {
+		if data := rawdb.ReadAccountSnapshot(db, common.BytesToHash(entry.k)); len(data) == 0 {
+			t.Errorf("missing account after resumed download: %x", entry.k)
+		}
+	}
+}
+
+// TestFetchAccessListsSinglePeer verifies fetching BALs from a single peer.
+func TestFetchAccessListsSinglePeer(t *testing.T) {
+	t.Parallel()
+	var (
+		once   sync.Once
+		cancel = make(chan struct{})
+		term   = func() { once.Do(func() { close(cancel) }) }
+	)
+
+	// Create test BALs
+	hashes := []common.Hash{
+		common.HexToHash("0x01"),
+		common.HexToHash("0x02"),
+		common.HexToHash("0x03"),
+	}
+	bals := make(map[common.Hash]rlp.RawValue)
+	for _, h := range hashes {
+		cb := bal.NewConstructionBlockAccessList()
+		cb.BalanceChange(0, common.HexToAddress("0xaa"), uint256.NewInt(uint64(h[31])))
+		var buf bytes.Buffer
+		if err := cb.EncodeRLP(&buf); err != nil {
+			t.Fatal(err)
+		}
+		bals[h] = buf.Bytes()
+	}
+	source := newTestPeer("source", t, term)
+	source.accessLists = bals
+	syncer := setupSyncer(rawdb.HashScheme, source)
+	results, err := syncer.fetchAccessLists(hashes, cancel)
+	if err != nil {
+		t.Fatalf("fetchAccessLists failed: %v", err)
+	}
+	if len(results) != len(hashes) {
+		t.Fatalf("result count mismatch: got %d, want %d", len(results), len(hashes))
+	}
+
+	// Verify results match input order
+	for i, h := range hashes {
+		if !bytes.Equal(results[i], bals[h]) {
+			t.Errorf("result %d mismatch", i)
+		}
+	}
+}
+
+// TestFetchAccessListsMultiplePeers verifies that fetch distributes work
+// across multiple idle peers.
+func TestFetchAccessListsMultiplePeers(t *testing.T) {
+	t.Parallel()
+	var (
+		once   sync.Once
+		cancel = make(chan struct{})
+		term   = func() { once.Do(func() { close(cancel) }) }
+	)
+
+	// Create enough BALs to potentially split across peers
+	var hashes []common.Hash
+	bals := make(map[common.Hash]rlp.RawValue)
+	for i := 0; i < 10; i++ {
+		h := common.HexToHash(fmt.Sprintf("0x%02x", i+1))
+		hashes = append(hashes, h)
+		cb := bal.NewConstructionBlockAccessList()
+		cb.BalanceChange(0, common.HexToAddress("0xaa"), uint256.NewInt(uint64(i)))
+		var buf bytes.Buffer
+		if err := cb.EncodeRLP(&buf); err != nil {
+			t.Fatal(err)
+		}
+		bals[h] = buf.Bytes()
+	}
+	mkSource := func(name string) *testPeer {
+		source := newTestPeer(name, t, term)
+		source.accessLists = bals
+		return source
+	}
+	syncer := setupSyncer(rawdb.HashScheme, mkSource("peer-a"), mkSource("peer-b"), mkSource("peer-c"))
+	results, err := syncer.fetchAccessLists(hashes, cancel)
+	if err != nil {
+		t.Fatalf("fetchAccessLists failed: %v", err)
+	}
+	if len(results) != len(hashes) {
+		t.Fatalf("result count mismatch: got %d, want %d", len(results), len(hashes))
+	}
+}
+
+// TestFetchAccessListsPeerTimeout verifies that timed-out requests are retried
+// with a different peer.
+func TestFetchAccessListsPeerTimeout(t *testing.T) {
+	t.Parallel()
+	var (
+		once   sync.Once
+		cancel = make(chan struct{})
+		term   = func() { once.Do(func() { close(cancel) }) }
+	)
+	hashes := []common.Hash{common.HexToHash("0x01")}
+	bals := make(map[common.Hash]rlp.RawValue)
+	cb := bal.NewConstructionBlockAccessList()
+	cb.BalanceChange(0, common.HexToAddress("0xaa"), uint256.NewInt(42))
+	var buf bytes.Buffer
+	if err := cb.EncodeRLP(&buf); err != nil {
+		t.Fatal(err)
+	}
+	bals[hashes[0]] = buf.Bytes()
+
+	// First peer never responds
+	nonResponsive := newTestPeer("non-responsive", t, term)
+	nonResponsive.accessListRequestHandler = func(t *testPeer, id uint64, hashes []common.Hash, max int) error {
+		// Don't respond — let it time out
+		return nil
+	}
+
+	// Second peer serves correctly
+	good := newTestPeer("good", t, term)
+	good.accessLists = bals
+	syncer := setupSyncer(rawdb.HashScheme, nonResponsive, good)
+	syncer.rates.OverrideTTLLimit = time.Millisecond // Fast timeout
+	results, err := syncer.fetchAccessLists(hashes, cancel)
+	if err != nil {
+		t.Fatalf("fetchAccessLists failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("result count mismatch: got %d, want 1", len(results))
+	}
+}
+
+// TestFetchAccessListsPeerRejection verifies that peers returning empty
+// responses are marked stateless and work is retried with another peer.
+func TestFetchAccessListsPeerRejection(t *testing.T) {
+	t.Parallel()
+	var (
+		once   sync.Once
+		cancel = make(chan struct{})
+		term   = func() { once.Do(func() { close(cancel) }) }
+	)
+	hashes := []common.Hash{common.HexToHash("0x01")}
+	bals := make(map[common.Hash]rlp.RawValue)
+	cb := bal.NewConstructionBlockAccessList()
+	cb.BalanceChange(0, common.HexToAddress("0xaa"), uint256.NewInt(42))
+	var buf bytes.Buffer
+	if err := cb.EncodeRLP(&buf); err != nil {
+		t.Fatal(err)
+	}
+	bals[hashes[0]] = buf.Bytes()
+
+	// First peer rejects (has no BAL data, returns empty)
+	// accessLists is nil, so defaultAccessListRequestHandler returns empty
+	rejector := newTestPeer("rejector", t, term)
+
+	// Second peer serves correctly
+	good := newTestPeer("good", t, term)
+	good.accessLists = bals
+	syncer := setupSyncer(rawdb.HashScheme, rejector, good)
+	results, err := syncer.fetchAccessLists(hashes, cancel)
+	if err != nil {
+		t.Fatalf("fetchAccessLists failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("result count mismatch: got %d, want 1", len(results))
+	}
+}
+
+// TestFetchAccessListsCancel verifies that fetchAccessLists returns promptly
+// when cancelled.
+func TestFetchAccessListsCancel(t *testing.T) {
+	t.Parallel()
+	cancel := make(chan struct{})
+
+	// Peer that never responds
+	nonResponsive := newTestPeer("non-responsive", t, func() {})
+	nonResponsive.accessListRequestHandler = func(t *testPeer, id uint64, hashes []common.Hash, max int) error {
+		return nil // never deliver
+	}
+	syncer := setupSyncer(rawdb.HashScheme, nonResponsive)
+	hashes := []common.Hash{common.HexToHash("0x01")}
+
+	// Cancel after a short delay
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(cancel)
+	}()
+	_, err := syncer.fetchAccessLists(hashes, cancel)
+	if err != ErrCancelled {
+		t.Fatalf("expected ErrCancelled, got %v", err)
+	}
+}
+
+// TestFetchAccessListsPeerDrop verifies that dropping a peer mid-request
+// causes the request to be retried with a different peer.
+func TestFetchAccessListsPeerDrop(t *testing.T) {
+	t.Parallel()
+	var (
+		once   sync.Once
+		cancel = make(chan struct{})
+		term   = func() { once.Do(func() { close(cancel) }) }
+	)
+	hashes := []common.Hash{common.HexToHash("0x01")}
+	bals := make(map[common.Hash]rlp.RawValue)
+	cb := bal.NewConstructionBlockAccessList()
+	cb.BalanceChange(0, common.HexToAddress("0xaa"), uint256.NewInt(42))
+	var buf bytes.Buffer
+	if err := cb.EncodeRLP(&buf); err != nil {
+		t.Fatal(err)
+	}
+	bals[hashes[0]] = buf.Bytes()
+
+	// First peer will be dropped mid-request
+	dropped := newTestPeer("dropped", t, term)
+	dropped.accessListRequestHandler = func(tp *testPeer, id uint64, hashes []common.Hash, max int) error {
+		// Simulate peer dropping by unregistering
+		tp.remote.Unregister(tp.id)
+		return nil
+	}
+
+	// Second peer serves correctly
+	good := newTestPeer("good", t, term)
+	good.accessLists = bals
+	syncer := setupSyncer(rawdb.HashScheme, dropped, good)
+	results, err := syncer.fetchAccessLists(hashes, cancel)
+	if err != nil {
+		t.Fatalf("fetchAccessLists failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("result count mismatch: got %d, want 1", len(results))
 	}
 }
 

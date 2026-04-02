@@ -399,6 +399,7 @@ func NewSyncer(db ethdb.Database, scheme string) *Syncer {
 		rates:    msgrate.NewTrackers(log.New("proto", "snap")),
 		update:   make(chan struct{}, 1),
 
+		statelessPeers:   make(map[string]struct{}),
 		accountIdlers:    make(map[string]struct{}),
 		storageIdlers:    make(map[string]struct{}),
 		bytecodeIdlers:   make(map[string]struct{}),
@@ -432,6 +433,7 @@ func (s *Syncer) Register(peer SyncPeer) error {
 	s.accountIdlers[id] = struct{}{}
 	s.storageIdlers[id] = struct{}{}
 	s.bytecodeIdlers[id] = struct{}{}
+	s.accessListIdlers[id] = struct{}{}
 	s.lock.Unlock()
 
 	// Notify any active syncs that a new peer can be assigned data
@@ -458,6 +460,7 @@ func (s *Syncer) Unregister(id string) error {
 	delete(s.accountIdlers, id)
 	delete(s.storageIdlers, id)
 	delete(s.bytecodeIdlers, id)
+	delete(s.accessListIdlers, id)
 	s.lock.Unlock()
 
 	// Notify any active syncs that pending requests need to be reverted
@@ -702,7 +705,7 @@ func (s *Syncer) fetchAccessLists(hashes []common.Hash, cancel chan struct{}) ([
 	peerDropSub := s.peerDrop.Subscribe(peerDrop)
 	defer peerDropSub.Unsubscribe()
 
-	// Track which hashes still need fetching and collected results
+	// pending = hashes not yet assigned to a peer, fetched = collected results.
 	pending := make(map[common.Hash]struct{}, len(hashes))
 	for _, h := range hashes {
 		pending[h] = struct{}{}
@@ -714,7 +717,7 @@ func (s *Syncer) fetchAccessLists(hashes []common.Hash, cancel chan struct{}) ([
 		accessListReqFails = make(chan *accessListRequest)
 		accessListResps    = make(chan *accessListResponse)
 	)
-	for len(pending) > 0 {
+	for len(fetched) < len(hashes) {
 		// Assign access list retrieval tasks to idle peers
 		s.assignAccessListTasks(pending, accessListResps, accessListReqFails, cancel)
 
@@ -725,6 +728,16 @@ func (s *Syncer) fetchAccessLists(hashes []common.Hash, cancel chan struct{}) ([
 		case <-peerJoin:
 			// A new peer joined, try to assign it work
 		case id := <-peerDrop:
+			// Re-add hashes from any requests for this peer
+			s.lock.Lock()
+			for _, req := range s.accessListReqs {
+				if req.peer == id {
+					for _, h := range req.hashes {
+						pending[h] = struct{}{}
+					}
+				}
+			}
+			s.lock.Unlock()
 			s.revertRequests(id)
 		case <-cancel:
 			return nil, ErrCancelled
