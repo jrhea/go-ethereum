@@ -40,6 +40,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/trie/trienode"
+	"github.com/ethereum/go-ethereum/triedb"
 )
 
 const (
@@ -490,12 +491,15 @@ func (s *Syncer) Sync(root common.Hash, number uint64, cancel chan struct{}) err
 	// Retrieve the previous sync status from DB. If there's no persisted
 	// status, sync is either fresh or already complete.
 	s.loadSyncStatus()
+	var syncComplete bool
 	defer func() {
-		for _, task := range s.tasks {
-			s.forwardAccountTask(task)
+		if !syncComplete {
+			for _, task := range s.tasks {
+				s.forwardAccountTask(task)
+			}
+			s.cleanAccountTasks()
+			s.saveSyncStatus()
 		}
-		s.cleanAccountTasks()
-		s.saveSyncStatus()
 	}()
 
 	log.Debug("Starting snapshot sync cycle", "root", root)
@@ -513,27 +517,33 @@ func (s *Syncer) Sync(root common.Hash, number uint64, cancel chan struct{}) err
 	}()
 
 	// Sync loop
+	log.Info("Starting state download", "root", root)
 	for {
-		// bulk flat-state download
 		err := s.download(cancel)
 		if err == errPivotStale {
-			// The pivot moved. Catch up with BALs and resume download.
 			if err := s.catchUp(cancel); err != nil {
 				return err
 			}
 			s.resetDownload(root, number)
+			log.Info("Resuming state download", "root", root)
 			continue
 		}
 		if err != nil {
 			return err
 		}
+		log.Info("State download complete", "root", root)
 
-		// trie rebuild
-		if err := s.rebuildTrie(root, cancel); err != nil {
+		// Trie rebuild: build all tries from flat state and verify root
+		log.Info("Starting trie rebuild", "root", root)
+		if err := triedb.GenerateTrie(s.db, s.scheme, root); err != nil {
 			return err
 		}
+		log.Info("Trie rebuild complete", "root", root)
 
-		// All phases complete. Clear persisted status so we don't re-run
+		// All phases complete. Clear persisted status so we don't re-run.
+		// Set syncComplete to prevent the deferred saveSyncStatus from
+		// overwriting the nil.
+		syncComplete = true
 		rawdb.WriteSnapshotSyncStatus(s.db, nil)
 		return nil
 	}
@@ -631,11 +641,10 @@ func (s *Syncer) resetDownload(root common.Hash, number uint64) {
 	s.number = number
 	s.previousRoot = root // Prevent download() from returning errPivotStale again
 	s.previousNumber = number
-	s.lock.Unlock()
 
-	// TODO JR implement proper task regeneration for the new pivot.
-	// For now, this is a placeholder that will be filled in when
-	// catch-up is implemented.
+	// Clear stateless peers bc they may be able to serve the new pivot
+	s.statelessPeers = make(map[string]struct{})
+	s.lock.Unlock()
 }
 
 // catchUp runs the BAL catch-up. When the pivot has moved (previousRoot !=
@@ -845,13 +854,6 @@ func (s *Syncer) processAccessListResponse(res *accessListResponse, pending map[
 		delete(pending, h)
 	}
 	// If the response was short, the remaining hashes stay in pending for retry
-}
-
-// rebuildTrie runs the trie rebuild from consistent flat
-// state. It builds storage tries, account trie, and verifies the state root.
-func (s *Syncer) rebuildTrie(root common.Hash, cancel chan struct{}) error {
-	// TODO JR implement
-	return errors.New("trie rebuild not yet implemented")
 }
 
 // loadSyncStatus retrieves a previously aborted sync status from the database,

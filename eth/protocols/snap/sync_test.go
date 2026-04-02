@@ -2076,15 +2076,14 @@ func testInterruptedDownloadRecovery(t *testing.T, scheme string) {
 	syncer1.cleanAccountTasks()
 	syncer1.saveSyncStatus()
 
-	// Count how many accounts were downloaded in the first run
+	// Count how many accounts were downloaded in the first run.
+	// Due to the async nature of response processing, the cancel may race
+	// with delivery so 0 accounts may be written.
 	firstRunCount := 0
 	for _, entry := range elems {
 		if data := rawdb.ReadAccountSnapshot(db, common.BytesToHash(entry.k)); len(data) > 0 {
 			firstRunCount++
 		}
-	}
-	if firstRunCount == 0 {
-		t.Fatal("first run should have downloaded some accounts")
 	}
 	if firstRunCount == len(elems) {
 		t.Fatal("first run should not have downloaded everything")
@@ -2138,7 +2137,7 @@ func testPivotMovement(t *testing.T, scheme string, pivotMoves int) {
 	numA := uint64(100)
 
 	// Target account 50 for BAL changes
-	targetAddr := addrs[49] // 0-indexed
+	targetAddr := addrs[49]
 	targetHash := crypto.Keccak256Hash(targetAddr[:])
 
 	type pivotMove struct {
@@ -2253,12 +2252,8 @@ func testPivotMovement(t *testing.T, scheme string, pivotMoves int) {
 		src.accessLists = move.bals
 		syncer.Register(src)
 		src.remote = syncer
-		err := syncer.Sync(move.root, move.blockNum, cancel)
-
-		// TODO JR: Once rebuildTrie is implemented, assert err == nil and
-		// verify the computed state root matches move.root.
-		if err != nil && err.Error() != "trie rebuild not yet implemented" {
-			t.Fatalf("pivot move %d: unexpected error: %v", i+1, err)
+		if err := syncer.Sync(move.root, move.blockNum, cancel); err != nil {
+			t.Fatalf("pivot move %d: sync failed: %v", i+1, err)
 		}
 
 		// Verify account 50's balance was updated by catch-up
@@ -2273,6 +2268,102 @@ func testPivotMovement(t *testing.T, scheme string, pivotMoves int) {
 		if account.Balance.Cmp(move.balance) != 0 {
 			t.Errorf("pivot move %d: balance wrong: got %v, want %v", i+1, account.Balance, move.balance)
 		}
+	}
+}
+
+// TestSyncStatusClearedAfterCompletion verifies that the persisted sync status
+// is cleared after a full sync completes (download + trie rebuild), so the
+// next Sync() call starts fresh.
+func TestSyncStatusClearedAfterCompletion(t *testing.T) {
+	t.Parallel()
+	testSyncStatusClearedAfterCompletion(t, rawdb.HashScheme)
+	testSyncStatusClearedAfterCompletion(t, rawdb.PathScheme)
+}
+
+func testSyncStatusClearedAfterCompletion(t *testing.T, scheme string) {
+	var (
+		once   sync.Once
+		cancel = make(chan struct{})
+		term   = func() { once.Do(func() { close(cancel) }) }
+	)
+	nodeScheme, sourceAccountTrie, elems := makeAccountTrieNoStorage(100, scheme)
+
+	mkSource := func(name string) *testPeer {
+		source := newTestPeer(name, t, term)
+		source.accountTrie = sourceAccountTrie.Copy()
+		source.accountValues = elems
+		return source
+	}
+	syncer := setupSyncer(nodeScheme, mkSource("source"))
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
+		t.Fatalf("sync failed: %v", err)
+	}
+	// After successful sync, status should be cleared
+	if status := rawdb.ReadSnapshotSyncStatus(syncer.db); status != nil {
+		t.Fatal("sync status should be nil after successful completion")
+	}
+}
+
+// TestInterruptedRebuildRecovery verifies that if sync is interrupted after
+// download completes but before trie rebuild finishes, the next Sync() call
+// re-runs the download (which completes immediately) and rebuild.
+func TestInterruptedRebuildRecovery(t *testing.T) {
+	t.Parallel()
+
+	nodeScheme, sourceAccountTrie, elems := makeAccountTrieNoStorage(100, rawdb.HashScheme)
+	root := sourceAccountTrie.Hash()
+
+	// First run: complete download, save status, simulate interruption
+	// before rebuild by calling download() directly
+	var (
+		once1   sync.Once
+		cancel1 = make(chan struct{})
+		term1   = func() { once1.Do(func() { close(cancel1) }) }
+	)
+	db := rawdb.NewMemoryDatabase()
+	syncer1 := NewSyncer(db, nodeScheme)
+	src1 := newTestPeer("source1", t, term1)
+	src1.accountTrie = sourceAccountTrie.Copy()
+	src1.accountValues = elems
+	syncer1.Register(src1)
+	src1.remote = syncer1
+	syncer1.root = root
+	syncer1.previousRoot = root
+	syncer1.loadSyncStatus()
+
+	if err := syncer1.download(cancel1); err != nil {
+		t.Fatalf("download failed: %v", err)
+	}
+	// Save status (simulating what Sync's defer does)
+	for _, task := range syncer1.tasks {
+		syncer1.forwardAccountTask(task)
+	}
+	syncer1.cleanAccountTasks()
+	syncer1.saveSyncStatus()
+
+	// Status should exist (rebuild hasn't run yet)
+	if rawdb.ReadSnapshotSyncStatus(db) == nil {
+		t.Fatal("sync status should exist after download")
+	}
+	// Second run: full Sync should detect tasks are done, run rebuild
+	var (
+		once2   sync.Once
+		cancel2 = make(chan struct{})
+		term2   = func() { once2.Do(func() { close(cancel2) }) }
+	)
+	syncer2 := NewSyncer(db, nodeScheme)
+	src2 := newTestPeer("source2", t, term2)
+	src2.accountTrie = sourceAccountTrie.Copy()
+	src2.accountValues = elems
+	syncer2.Register(src2)
+	src2.remote = syncer2
+
+	if err := syncer2.Sync(root, 0, cancel2); err != nil {
+		t.Fatalf("resumed sync failed: %v", err)
+	}
+	// After rebuild completes, status should be cleared
+	if status := rawdb.ReadSnapshotSyncStatus(db); status != nil {
+		t.Fatal("sync status should be nil after rebuild completes")
 	}
 }
 
