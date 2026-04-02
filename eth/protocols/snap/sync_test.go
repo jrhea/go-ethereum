@@ -589,7 +589,7 @@ func testSyncBloatedProof(t *testing.T, scheme string) {
 		return nil
 	}
 	syncer := setupSyncer(nodeScheme, source)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err == nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err == nil {
 		t.Fatal("No error returned from incomplete/cancelled sync")
 	}
 }
@@ -631,7 +631,7 @@ func testSync(t *testing.T, scheme string) {
 		return source
 	}
 	syncer := setupSyncer(nodeScheme, mkSource("source"))
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	verifyTrie(scheme, syncer.db, sourceAccountTrie.Hash(), t)
@@ -666,7 +666,7 @@ func testSyncTinyTriePanic(t *testing.T, scheme string) {
 	}
 	syncer := setupSyncer(nodeScheme, mkSource("source"))
 	done := checkStall(t, term)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	close(done)
@@ -701,7 +701,7 @@ func testMultiSync(t *testing.T, scheme string) {
 	}
 	syncer := setupSyncer(nodeScheme, mkSource("sourceA"), mkSource("sourceB"))
 	done := checkStall(t, term)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	close(done)
@@ -738,7 +738,7 @@ func testSyncWithStorage(t *testing.T, scheme string) {
 	}
 	syncer := setupSyncer(scheme, mkSource("sourceA"))
 	done := checkStall(t, term)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	close(done)
@@ -788,7 +788,7 @@ func testMultiSyncManyUseless(t *testing.T, scheme string) {
 		mkSource("noStorage", true, false),
 	)
 	done := checkStall(t, term)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	close(done)
@@ -843,7 +843,7 @@ func testMultiSyncManyUselessWithLowTimeout(t *testing.T, scheme string) {
 	syncer.rates.OverrideTTLLimit = time.Millisecond
 
 	done := checkStall(t, term)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	close(done)
@@ -896,7 +896,7 @@ func testMultiSyncManyUnresponsive(t *testing.T, scheme string) {
 	syncer.rates.OverrideTTLLimit = time.Millisecond
 
 	done := checkStall(t, term)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	close(done)
@@ -950,7 +950,7 @@ func testSyncBoundaryAccountTrie(t *testing.T, scheme string) {
 		mkSource("peer-b"),
 	)
 	done := checkStall(t, term)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	close(done)
@@ -997,7 +997,7 @@ func testSyncNoStorageAndOneCappedPeer(t *testing.T, scheme string) {
 		mkSource("capped", true),
 	)
 	done := checkStall(t, term)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	close(done)
@@ -1042,7 +1042,7 @@ func testSyncNoStorageAndOneCodeCorruptPeer(t *testing.T, scheme string) {
 		mkSource("corrupt", corruptCodeRequestHandler),
 	)
 	done := checkStall(t, term)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	close(done)
@@ -1085,7 +1085,7 @@ func testSyncNoStorageAndOneAccountCorruptPeer(t *testing.T, scheme string) {
 		mkSource("corrupt", corruptAccountRequestHandler),
 	)
 	done := checkStall(t, term)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	close(done)
@@ -1131,7 +1131,7 @@ func testSyncNoStorageAndOneCodeCappedPeer(t *testing.T, scheme string) {
 		}),
 	)
 	done := checkStall(t, term)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	close(done)
@@ -1183,7 +1183,7 @@ func testSyncBoundaryStorageTrie(t *testing.T, scheme string) {
 		mkSource("peer-b"),
 	)
 	done := checkStall(t, term)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	close(done)
@@ -1230,7 +1230,7 @@ func testSyncWithStorageAndOneCappedPeer(t *testing.T, scheme string) {
 		mkSource("slow", true),
 	)
 	done := checkStall(t, term)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	close(done)
@@ -1276,7 +1276,7 @@ func testSyncWithStorageAndCorruptPeer(t *testing.T, scheme string) {
 		mkSource("corrupt", corruptStorageRequestHandler),
 	)
 	done := checkStall(t, term)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	close(done)
@@ -1319,7 +1319,7 @@ func testSyncWithStorageAndNonProvingPeer(t *testing.T, scheme string) {
 		mkSource("corrupt", noProofStorageRequestHandler),
 	)
 	done := checkStall(t, term)
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	close(done)
@@ -1359,7 +1359,7 @@ func testSyncWithStorageMisbehavingProve(t *testing.T, scheme string) {
 		return source
 	}
 	syncer := setupSyncer(nodeScheme, mkSource("sourceA"))
-	if err := syncer.Sync(sourceAccountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(sourceAccountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	verifyTrie(scheme, syncer.db, sourceAccountTrie.Hash(), t)
@@ -1398,7 +1398,7 @@ func testSyncWithUnevenStorage(t *testing.T, scheme string) {
 		return source
 	}
 	syncer := setupSyncer(scheme, mkSource("source"))
-	if err := syncer.Sync(accountTrie.Hash(), cancel); err != nil {
+	if err := syncer.Sync(accountTrie.Hash(), 0, cancel); err != nil {
 		t.Fatalf("sync failed: %v", err)
 	}
 	verifyTrie(scheme, syncer.db, accountTrie.Hash(), t)

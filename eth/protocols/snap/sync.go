@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/types/bal"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
@@ -290,8 +291,9 @@ type storageTask struct {
 // sync. Opposed to full and fast sync, there is no way to restart a suspended
 // snap sync without prior knowledge of the suspension point.
 type SyncProgress struct {
-	Root  common.Hash    // State root being synced (for pivot move detection)
-	Tasks []*accountTask // The suspended account tasks (contract tasks within)
+	Root        common.Hash    // State root being synced (for pivot move detection)
+	BlockNumber uint64         // Block number of the pivot
+	Tasks       []*accountTask // The suspended account tasks (contract tasks within)
 
 	// Status report during syncing phase
 	AccountSynced  uint64             // Number of accounts downloaded
@@ -341,13 +343,15 @@ type SyncPeer interface {
 //   - The peer delivers a stale response after a previous timeout
 //   - The peer delivers a refusal to serve the requested state
 type Syncer struct {
-	db     ethdb.KeyValueStore // Database to store the trie nodes into (and dedup)
-	scheme string              // Node scheme used in node database
+	db     ethdb.Database // Database to store the trie nodes into (and dedup)
+	scheme string         // Node scheme used in node database
 
-	root         common.Hash    // Current state trie root being synced
-	previousRoot common.Hash    // Root from previous sync run (for pivot move detection)
-	tasks        []*accountTask // Current account task set being synced
-	update       chan struct{}  // Notification channel for possible sync progression
+	root           common.Hash    // Current state trie root being synced
+	number         uint64         // Block number of the current pivot
+	previousRoot   common.Hash    // Root from previous sync run (for pivot move detection)
+	previousNumber uint64         // Block number of the previous pivot
+	tasks          []*accountTask // Current account task set being synced
+	update         chan struct{}  // Notification channel for possible sync progression
 
 	peers    map[string]SyncPeer // Currently active peers to download from
 	peerJoin *event.Feed         // Event feed to react to peers joining
@@ -384,7 +388,7 @@ type Syncer struct {
 
 // NewSyncer creates a new snapshot syncer to download the Ethereum state over the
 // snap protocol.
-func NewSyncer(db ethdb.KeyValueStore, scheme string) *Syncer {
+func NewSyncer(db ethdb.Database, scheme string) *Syncer {
 	return &Syncer{
 		db:     db,
 		scheme: scheme,
@@ -467,10 +471,13 @@ var errPivotStale = errors.New("pivot stale")
 
 // Sync starts (or resumes a previous) sync cycle to iterate over a state trie
 // with the given root and reconstruct the nodes based on the snapshot leaves.
-func (s *Syncer) Sync(root common.Hash, cancel chan struct{}) error {
+// The number parameter is the block number of the pivot block.
+func (s *Syncer) Sync(root common.Hash, number uint64, cancel chan struct{}) error {
 	s.lock.Lock()
 	s.root = root
+	s.number = number
 	s.previousRoot = root // Default: no pivot move. loadSyncStatus may overwrite.
+	s.previousNumber = number
 	s.statelessPeers = make(map[string]struct{})
 	s.lock.Unlock()
 	if s.startTime.IsZero() {
@@ -511,7 +518,7 @@ func (s *Syncer) Sync(root common.Hash, cancel chan struct{}) error {
 			if err := s.catchUp(cancel); err != nil {
 				return err
 			}
-			s.resetDownload(root)
+			s.resetDownload(root, number)
 			continue
 		}
 		if err != nil {
@@ -615,10 +622,12 @@ func (s *Syncer) download(cancel chan struct{}) error {
 // resetDownload resets the download state for a new pivot after catch-up.
 // It regenerates the task list for accounts not yet downloaded, clears
 // in-flight requests, and updates the root.
-func (s *Syncer) resetDownload(root common.Hash) {
+func (s *Syncer) resetDownload(root common.Hash, number uint64) {
 	s.lock.Lock()
 	s.root = root
+	s.number = number
 	s.previousRoot = root // Prevent download() from returning errPivotStale again
+	s.previousNumber = number
 	s.lock.Unlock()
 
 	// TODO JR implement proper task regeneration for the new pivot.
@@ -626,13 +635,56 @@ func (s *Syncer) resetDownload(root common.Hash) {
 	// catch-up is implemented.
 }
 
-// catchUp runs the BAL catch-up. When the pivot
-// has moved (previousRoot != root), it fetches access lists for the gap blocks,
-// verifies them against block headers, and applies the diffs to roll flat state
-// forward from previousRoot to root.
+// catchUp runs the BAL catch-up. When the pivot has moved (previousRoot !=
+// root), it fetches BALs for the gap blocks, verifies them against
+// block headers, and applies the diffs to roll flat state forward.
 func (s *Syncer) catchUp(cancel chan struct{}) error {
-	// TODO JR implement
-	return errors.New("catch-up not yet implemented")
+	from := s.previousNumber + 1
+	to := s.number
+
+	log.Info("Starting access list catch-up", "from", from, "to", to, "blocks", to-from+1)
+
+	// Collect block hashes for the gap range
+	hashes := make([]common.Hash, 0, to-from+1)
+	for num := from; num <= to; num++ {
+		hash := rawdb.ReadCanonicalHash(s.db, num)
+		if hash == (common.Hash{}) {
+			return fmt.Errorf("missing canonical hash for block %d during catch-up", num)
+		}
+		hashes = append(hashes, hash)
+	}
+
+	// Fetch BALs from peers
+	rawBALs, err := s.fetchAccessLists(hashes, cancel)
+	if err != nil {
+		return err
+	}
+
+	// Verify and apply each BAL in block order
+	for i, raw := range rawBALs {
+		num := from + uint64(i)
+		hash := hashes[i]
+
+		// Decode the raw RLP into a BlockAccessList
+		var bal bal.BlockAccessList
+		if err := rlp.DecodeBytes(raw, &bal); err != nil {
+			return fmt.Errorf("failed to decode BAL for block %d: %v", num, err)
+		}
+		// Verify against the block header
+		header := rawdb.ReadHeader(s.db, hash, num)
+		if header == nil {
+			return fmt.Errorf("missing header for block %d (hash %v) during catch-up", num, hash)
+		}
+		if err := verifyAccessList(&bal, header); err != nil {
+			return fmt.Errorf("BAL verification failed for block %d: %v", num, err)
+		}
+		// Apply the state diffs
+		if err := s.applyAccessList(&bal); err != nil {
+			return fmt.Errorf("BAL application failed for block %d: %v", num, err)
+		}
+	}
+	log.Info("Access list catch-up complete", "blocks", len(rawBALs))
+	return nil
 }
 
 // fetchAccessLists fetches BALs for the given block hashes from
@@ -814,6 +866,7 @@ func (s *Syncer) loadSyncStatus() {
 			defer s.lock.Unlock()
 
 			s.previousRoot = progress.Root
+			s.previousNumber = progress.BlockNumber
 			s.accountSynced = progress.AccountSynced
 			s.accountBytes = progress.AccountBytes
 			s.bytecodeSynced = progress.BytecodeSynced
@@ -871,6 +924,7 @@ func (s *Syncer) saveSyncStatus() {
 	// Store the actual progress markers
 	progress := &SyncProgress{
 		Root:           s.root,
+		BlockNumber:    s.number,
 		Tasks:          s.tasks,
 		AccountSynced:  s.accountSynced,
 		AccountBytes:   s.accountBytes,

@@ -873,7 +873,7 @@ func (d *Downloader) processSnapSyncContent() error {
 	// Start syncing state of the reported head block. This should get us most of
 	// the state of the pivot block.
 	d.pivotLock.RLock()
-	sync := d.syncState(d.pivotHeader.Root)
+	sync := d.syncState(d.pivotHeader.Root, d.pivotHeader.Number.Uint64())
 	d.pivotLock.RUnlock()
 
 	defer func() {
@@ -945,7 +945,7 @@ func (d *Downloader) processSnapSyncContent() error {
 			if !d.committed.Load() { // not yet passed the pivot, we can move the pivot
 				if pivot.Root != sync.root { // pivot position changed, we can move the pivot
 					sync.Cancel()
-					sync = d.syncState(pivot.Root)
+					sync = d.syncState(pivot.Root, pivot.Number.Uint64())
 
 					go closeOnErr(sync)
 				}
@@ -961,7 +961,7 @@ func (d *Downloader) processSnapSyncContent() error {
 			// If new pivot block found, cancel old state retrieval and restart
 			if oldPivot != P {
 				sync.Cancel()
-				sync = d.syncState(P.Header.Root)
+				sync = d.syncState(P.Header.Root, P.Header.Number.Uint64())
 
 				go closeOnErr(sync)
 				oldPivot = P
