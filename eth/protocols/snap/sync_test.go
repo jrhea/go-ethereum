@@ -1491,6 +1491,42 @@ func makeAccountTrieNoStorage(n int, scheme string) (string, *trie.Trie, []*kv) 
 	return db.Scheme(), accTrie, entries
 }
 
+// makeAccountTrieWithAddresses creates an account trie keyed by keccak(address),
+// matching production behavior. Returns the trie, sorted entries, and the
+// addresses used. This allows BAL-based tests to target specific addresses and
+// have applyAccessList write to the same snapshot keys as the download.
+func makeAccountTrieWithAddresses(n int, scheme string) (string, *trie.Trie, []*kv, []common.Address) {
+	var (
+		db      = triedb.NewDatabase(rawdb.NewMemoryDatabase(), newDbConfig(scheme))
+		accTrie = trie.NewEmpty(db)
+		entries []*kv
+		addrs   []common.Address
+	)
+	for i := uint64(1); i <= uint64(n); i++ {
+		// Deterministic address from index
+		addr := common.BigToAddress(new(big.Int).SetUint64(i))
+		addrs = append(addrs, addr)
+
+		value, _ := rlp.EncodeToBytes(&types.StateAccount{
+			Nonce:    i,
+			Balance:  uint256.NewInt(i),
+			Root:     types.EmptyRootHash,
+			CodeHash: types.EmptyCodeHash[:],
+		})
+		key := crypto.Keccak256(addr[:])
+		elem := &kv{key, value}
+		accTrie.MustUpdate(elem.k, elem.v)
+		entries = append(entries, elem)
+	}
+	slices.SortFunc(entries, (*kv).cmp)
+
+	root, nodes := accTrie.Commit(false)
+	db.Update(root, types.EmptyRootHash, 0, trienode.NewWithNodeSet(nodes), triedb.NewStateSet())
+
+	accTrie, _ = trie.New(trie.StateTrieID(root), db)
+	return db.Scheme(), accTrie, entries, addrs
+}
+
 // makeBoundaryAccountTrie constructs an account trie. Instead of filling
 // accounts normally, this function will fill a few accounts which have
 // boundary hash.
@@ -2077,6 +2113,165 @@ func testInterruptedDownloadRecovery(t *testing.T, scheme string) {
 	for _, entry := range elems {
 		if data := rawdb.ReadAccountSnapshot(db, common.BytesToHash(entry.k)); len(data) == 0 {
 			t.Errorf("missing account after resumed download: %x", entry.k)
+		}
+	}
+}
+
+// TestPivotMovement verifies the full pivot move flow: download with rootA,
+// cancel+restart with rootB, catch-up applies BAL diffs, download resumes
+// and completes against the new state.
+func TestPivotMovement(t *testing.T) {
+	t.Parallel()
+	testPivotMovement(t, rawdb.HashScheme, 1)
+}
+
+// TestPivotMovementRepeated verifies that multiple pivot moves work correctly.
+func TestPivotMovementRepeated(t *testing.T) {
+	t.Parallel()
+	testPivotMovement(t, rawdb.HashScheme, 2)
+}
+
+func testPivotMovement(t *testing.T, scheme string, pivotMoves int) {
+	// Use makeAccountTrieWithAddresses so trie keys are keccak(addr),
+	// matching what applyAccessList writes to the snapshot DB.
+	nodeScheme, sourceAccountTrie, elems, addrs := makeAccountTrieWithAddresses(100, scheme)
+	numA := uint64(100)
+
+	// Target account 50 for BAL changes
+	targetAddr := addrs[49] // 0-indexed
+	targetHash := crypto.Keccak256Hash(targetAddr[:])
+
+	type pivotMove struct {
+		blockNum uint64
+		trie     *trie.Trie
+		elems    []*kv
+		root     common.Hash
+		bals     map[common.Hash]rlp.RawValue // header hash -> encoded BAL
+		balance  *uint256.Int
+	}
+
+	// Build each pivot move: update account 50's balance in both the trie
+	// and a BAL, write the header, and record everything.
+	db := rawdb.NewMemoryDatabase()
+	currentElems := elems
+	moves := make([]pivotMove, pivotMoves)
+	emptyHash := common.Hash{}
+	zero := uint64(0)
+	for m := 0; m < pivotMoves; m++ {
+		blockNum := numA + uint64(m) + 1
+		balance := uint256.NewInt(uint64(1000 * (m + 1)))
+
+		// Build updated trie with new balance for account 50
+		trieDB := triedb.NewDatabase(rawdb.NewMemoryDatabase(), newDbConfig(scheme))
+		newTrie := trie.NewEmpty(trieDB)
+		newElems := make([]*kv, len(currentElems))
+		for i, entry := range currentElems {
+			if bytes.Equal(entry.k, targetHash[:]) {
+				val, _ := rlp.EncodeToBytes(&types.StateAccount{
+					Nonce: 50, Balance: balance,
+					Root: types.EmptyRootHash, CodeHash: types.EmptyCodeHash[:],
+				})
+				newElems[i] = &kv{entry.k, val}
+			} else {
+				newElems[i] = entry
+			}
+			newTrie.MustUpdate(newElems[i].k, newElems[i].v)
+		}
+		newRoot, nodes := newTrie.Commit(false)
+		trieDB.Update(newRoot, types.EmptyRootHash, 0, trienode.NewWithNodeSet(nodes), triedb.NewStateSet())
+		resultTrie, _ := trie.New(trie.StateTrieID(newRoot), trieDB)
+
+		// Build BAL matching the trie diff
+		cb := bal.NewConstructionBlockAccessList()
+		cb.BalanceChange(0, targetAddr, balance)
+		var buf bytes.Buffer
+		if err := cb.EncodeRLP(&buf); err != nil {
+			t.Fatal(err)
+		}
+
+		// Compute BAL hash, write header, store BAL keyed by header hash
+		var b bal.BlockAccessList
+		if err := rlp.DecodeBytes(buf.Bytes(), &b); err != nil {
+			t.Fatal(err)
+		}
+		balHash := b.Hash()
+		header := &types.Header{
+			Number: new(big.Int).SetUint64(blockNum), Difficulty: common.Big0,
+			BaseFee: common.Big0, WithdrawalsHash: &emptyHash,
+			BlobGasUsed: &zero, ExcessBlobGas: &zero,
+			ParentBeaconRoot: &emptyHash, RequestsHash: &emptyHash,
+			BlockAccessListHash: &balHash,
+		}
+		rawdb.WriteHeader(db, header)
+		headerHash := header.Hash()
+		rawdb.WriteCanonicalHash(db, headerHash, blockNum)
+		moves[m] = pivotMove{
+			blockNum: blockNum,
+			trie:     resultTrie,
+			elems:    newElems,
+			root:     newRoot,
+			bals:     map[common.Hash]rlp.RawValue{headerHash: buf.Bytes()},
+			balance:  balance,
+		}
+		currentElems = newElems
+	}
+
+	// First run: download against rootA, cancel after 2 responses
+	rootA := sourceAccountTrie.Hash()
+	var (
+		once1     sync.Once
+		cancel1   = make(chan struct{})
+		term1     = func() { once1.Do(func() { close(cancel1) }) }
+		responses atomic.Int32
+	)
+	syncer1 := NewSyncer(db, nodeScheme)
+	src1 := newTestPeer("source1", t, term1)
+	src1.accountTrie = sourceAccountTrie.Copy()
+	src1.accountValues = elems
+	src1.accountRequestHandler = func(tp *testPeer, id uint64, root common.Hash, origin common.Hash, limit common.Hash, cap int) error {
+		if responses.Add(1) > 2 {
+			term1()
+			return nil
+		}
+		return defaultAccountRequestHandler(tp, id, root, origin, limit, cap)
+	}
+	syncer1.Register(src1)
+	src1.remote = syncer1
+	syncer1.Sync(rootA, numA, cancel1)
+
+	// Subsequent runs: each move triggers catch-up then resumes download
+	for i, move := range moves {
+		var (
+			once   sync.Once
+			cancel = make(chan struct{})
+			term   = func() { once.Do(func() { close(cancel) }) }
+		)
+		syncer := NewSyncer(db, nodeScheme)
+		src := newTestPeer(fmt.Sprintf("source-%d", i+2), t, term)
+		src.accountTrie = move.trie.Copy()
+		src.accountValues = move.elems
+		src.accessLists = move.bals
+		syncer.Register(src)
+		src.remote = syncer
+		err := syncer.Sync(move.root, move.blockNum, cancel)
+
+		// TODO JR: Once rebuildTrie is implemented, assert err == nil and
+		// verify the computed state root matches move.root.
+		if err != nil && err.Error() != "trie rebuild not yet implemented" {
+			t.Fatalf("pivot move %d: unexpected error: %v", i+1, err)
+		}
+
+		// Verify account 50's balance was updated by catch-up
+		data := rawdb.ReadAccountSnapshot(db, targetHash)
+		if len(data) == 0 {
+			t.Fatalf("pivot move %d: account 50 not found after sync", i+1)
+		}
+		account, aErr := types.FullAccount(data)
+		if aErr != nil {
+			t.Fatalf("pivot move %d: failed to decode account: %v", i+1, aErr)
+		}
+		if account.Balance.Cmp(move.balance) != 0 {
+			t.Errorf("pivot move %d: balance wrong: got %v, want %v", i+1, account.Balance, move.balance)
 		}
 	}
 }
