@@ -867,6 +867,36 @@ func (d *Downloader) importBlockResults(results []*fetchResult) error {
 	return nil
 }
 
+// checkDeepReorg checks if the old pivot block was reorged by comparing its
+// state root against the current canonical chain. If the canonical header at
+// the old pivot's block number has a different state root, the syncer's flat
+// state is from the old fork and must be wiped. Returns true if a deep reorg
+// was detected.
+func checkDeepReorg(db ethdb.Database, oldNumber uint64, oldRoot common.Hash) bool {
+	oldHash := rawdb.ReadCanonicalHash(db, oldNumber)
+	if oldHash == (common.Hash{}) {
+		return false
+	}
+	oldHeader := rawdb.ReadHeader(db, oldHash, oldNumber)
+	if oldHeader == nil {
+		return false
+	}
+	return oldHeader.Root != oldRoot
+}
+
+// restartSnapSync cancels the current state sync and starts a new one with the
+// given root. Before restarting, it checks for deep reorgs and wipes sync
+// progress if the old pivot was reorged.
+func (d *Downloader) restartSnapSync(oldSync *stateSync, newRoot common.Hash, newNumber uint64) *stateSync {
+	if checkDeepReorg(d.stateDB, oldSync.number, oldSync.root) {
+		log.Warn("Deep reorg detected, restarting snap sync from scratch",
+			"number", oldSync.number, "oldRoot", oldSync.root)
+		rawdb.WriteSnapshotSyncStatus(d.stateDB, nil)
+	}
+	oldSync.Cancel()
+	return d.syncState(newRoot, newNumber)
+}
+
 // processSnapSyncContent takes fetch results from the queue and writes them to the
 // database. It also controls the synchronisation of state nodes of the pivot block.
 func (d *Downloader) processSnapSyncContent() error {
@@ -944,9 +974,7 @@ func (d *Downloader) processSnapSyncContent() error {
 		if oldPivot == nil { // no results piling up, we can move the pivot
 			if !d.committed.Load() { // not yet passed the pivot, we can move the pivot
 				if pivot.Root != sync.root { // pivot position changed, we can move the pivot
-					sync.Cancel()
-					sync = d.syncState(pivot.Root, pivot.Number.Uint64())
-
+					sync = d.restartSnapSync(sync, pivot.Root, pivot.Number.Uint64())
 					go closeOnErr(sync)
 				}
 			}
@@ -960,9 +988,7 @@ func (d *Downloader) processSnapSyncContent() error {
 		if P != nil {
 			// If new pivot block found, cancel old state retrieval and restart
 			if oldPivot != P {
-				sync.Cancel()
-				sync = d.syncState(P.Header.Root, P.Header.Number.Uint64())
-
+				sync = d.restartSnapSync(sync, P.Header.Root, P.Header.Number.Uint64())
 				go closeOnErr(sync)
 				oldPivot = P
 			}

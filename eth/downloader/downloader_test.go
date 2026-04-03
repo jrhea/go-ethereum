@@ -698,3 +698,66 @@ func testSyncProgress(t *testing.T, protocol uint, mode SyncMode) {
 		t.Fatalf("Failed to sync chain in three seconds")
 	}
 }
+
+// TestDeepReorgDetection verifies that checkDeepReorg correctly identifies
+// when the canonical chain has reorged past the old pivot.
+func TestDeepReorgDetection(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	pivotNumber := uint64(100)
+	pivotRoot := common.HexToHash("0xaaaa")
+	reorgedRoot := common.HexToHash("0xbbbb")
+
+	// Write a header at the pivot number with a different root (simulating reorg)
+	header := &types.Header{
+		Number:     new(big.Int).SetUint64(pivotNumber),
+		Root:       reorgedRoot,
+		Difficulty: common.Big0,
+	}
+	rawdb.WriteHeader(db, header)
+	rawdb.WriteCanonicalHash(db, header.Hash(), pivotNumber)
+
+	// Should detect reorg: canonical root differs from our pivot root
+	if !checkDeepReorg(db, pivotNumber, pivotRoot) {
+		t.Fatal("expected deep reorg detection when roots differ")
+	}
+
+	// Should NOT detect reorg: canonical root matches our pivot root
+	if checkDeepReorg(db, pivotNumber, reorgedRoot) {
+		t.Fatal("should not detect reorg when roots match")
+	}
+
+	// Should NOT detect reorg: no canonical hash at that number
+	if checkDeepReorg(db, 999, pivotRoot) {
+		t.Fatal("should not detect reorg when block number is unknown")
+	}
+}
+
+// TestDeepReorgWipesProgress verifies that when a deep reorg is detected,
+// snap sync progress is wiped so the syncer starts fresh.
+func TestDeepReorgWipesProgress(t *testing.T) {
+	db := rawdb.NewMemoryDatabase()
+	pivotNumber := uint64(100)
+	pivotRoot := common.HexToHash("0xaaaa")
+	reorgedRoot := common.HexToHash("0xbbbb")
+
+	// Write some snap sync progress
+	rawdb.WriteSnapshotSyncStatus(db, []byte("some progress"))
+
+	// Write a reorged header
+	header := &types.Header{
+		Number:     new(big.Int).SetUint64(pivotNumber),
+		Root:       reorgedRoot,
+		Difficulty: common.Big0,
+	}
+	rawdb.WriteHeader(db, header)
+	rawdb.WriteCanonicalHash(db, header.Hash(), pivotNumber)
+
+	// Simulate what restartSnapSync does
+	if checkDeepReorg(db, pivotNumber, pivotRoot) {
+		rawdb.WriteSnapshotSyncStatus(db, nil)
+	}
+	// Progress should be wiped
+	if status := rawdb.ReadSnapshotSyncStatus(db); status != nil {
+		t.Fatal("snap sync progress should be wiped after deep reorg")
+	}
+}
