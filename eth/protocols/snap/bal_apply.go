@@ -56,7 +56,6 @@ func (s *Syncer) applyAccessList(b *bal.BlockAccessList) error {
 		if data := rawdb.ReadAccountSnapshot(s.db, accountHash); len(data) > 0 {
 			existing, err := types.FullAccount(data)
 			if err != nil {
-				// TODO JR: What to do in this case?
 				return fmt.Errorf("failed to decode account %v: %w", addr, err)
 			}
 			account = *existing

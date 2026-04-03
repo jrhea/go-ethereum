@@ -1080,8 +1080,8 @@ func (d *Downloader) DeliverSnapPacket(peer *snap.Peer, packet snap.Packet) erro
 		return d.SnapSyncer.OnByteCodes(peer, packet.ID, packet.Codes)
 
 	case *snap.TrieNodesPacket:
-		// Snap/2 no longer requests trie nodes; ignore stale responses
-		// TODO JR: Delete this
+		// Snap/2 no longer requests trie nodes. Stale responses from
+		// snap/1 peers are silently ignored.
 		return nil
 
 	case *snap.AccessListsPacket:
