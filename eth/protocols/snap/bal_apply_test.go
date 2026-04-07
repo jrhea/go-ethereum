@@ -101,8 +101,10 @@ func TestAccessListApplication(t *testing.T) {
 	}
 	rawdb.WriteAccountSnapshot(db, accountHash, types.SlimAccountRLP(original))
 
-	// Write an existing storage slot
-	slotHash := common.HexToHash("0xaa")
+	// Write an existing storage slot. The BAL uses raw slot keys, but the
+	// snapshot layer stores slots under keccak256(slot).
+	rawSlot := common.HexToHash("0xaa")
+	slotHash := crypto.Keccak256Hash(rawSlot[:])
 	rawdb.WriteStorageSnapshot(db, accountHash, slotHash, common.HexToHash("0x01").Bytes())
 
 	// Build a BAL that changes balance, nonce, code, and storage
@@ -110,7 +112,7 @@ func TestAccessListApplication(t *testing.T) {
 	cb.BalanceChange(0, addr, uint256.NewInt(2000))
 	cb.NonceChange(addr, 0, 6)
 	cb.CodeChange(addr, 0, []byte{0x60, 0x00}) // PUSH1 0x00
-	cb.StorageWrite(0, addr, slotHash, common.HexToHash("0x02"))
+	cb.StorageWrite(0, addr, rawSlot, common.HexToHash("0x02"))
 	b := buildTestBAL(t, &cb)
 	if err := syncer.applyAccessList(b); err != nil {
 		t.Fatalf("applyAccessList failed: %v", err)
@@ -215,12 +217,12 @@ func TestAccessListApplicationNewAccount(t *testing.T) {
 		t.Fatal("account should not exist yet")
 	}
 
-	// Build BAL for a new account
+	// Build BAL for a new account. BAL uses raw slot keys.
 	cb := bal.NewConstructionBlockAccessList()
 	cb.BalanceChange(0, addr, uint256.NewInt(42))
 	cb.NonceChange(addr, 0, 1)
-	slotHash := common.HexToHash("0xbb")
-	cb.StorageWrite(0, addr, slotHash, common.HexToHash("0xff"))
+	rawSlot := common.HexToHash("0xbb")
+	cb.StorageWrite(0, addr, rawSlot, common.HexToHash("0xff"))
 	b := buildTestBAL(t, &cb)
 	if err := syncer.applyAccessList(b); err != nil {
 		t.Fatalf("applyAccessList failed: %v", err)
@@ -245,7 +247,8 @@ func TestAccessListApplicationNewAccount(t *testing.T) {
 		t.Errorf("root should be empty for new account: got %v", account.Root)
 	}
 
-	// Verify storage was written
+	// Verify storage was written under keccak256(rawSlot)
+	slotHash := crypto.Keccak256Hash(rawSlot[:])
 	storageVal := rawdb.ReadStorageSnapshot(db, accountHash, slotHash)
 	if !bytes.Equal(storageVal, common.HexToHash("0xff").Bytes()) {
 		t.Errorf("storage wrong: got %x, want %x", storageVal, common.HexToHash("0xff").Bytes())

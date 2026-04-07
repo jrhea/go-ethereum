@@ -98,7 +98,7 @@ func (s *Syncer) applyAccessList(b *bal.BlockAccessList) error {
 		for _, slotWrites := range access.StorageWrites {
 			if n := len(slotWrites.Accesses); n > 0 {
 				value := slotWrites.Accesses[n-1].ValueAfter
-				storageHash := common.Hash(slotWrites.Slot)
+				storageHash := crypto.Keccak256Hash(slotWrites.Slot[:])
 				rawdb.WriteStorageSnapshot(batch, accountHash, storageHash, value[:])
 			}
 		}
