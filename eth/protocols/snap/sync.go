@@ -861,7 +861,10 @@ func (s *Syncer) processAccessListResponse(res *accessListResponse, pending map[
 		fetched[h] = raw
 		delete(pending, h)
 	}
-	// If the response was short, the remaining hashes stay in pending for retry
+	// Re-add hashes that were not served back to pending
+	for i := len(res.accessLists); i < len(res.req.hashes); i++ {
+		pending[res.req.hashes[i]] = struct{}{}
+	}
 }
 
 // loadSyncStatus retrieves a previously aborted sync status from the database,

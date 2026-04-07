@@ -453,12 +453,6 @@ func proofHappyStorageRequestHandler(t *testPeer, requestId uint64, root common.
 	return nil
 }
 
-//func emptyCodeRequestHandler(t *testPeer, id uint64, hashes []common.Hash, max uint64) error {
-//	var bytecodes [][]byte
-//	t.remote.OnByteCodes(t, id, bytecodes)
-//	return nil
-//}
-
 func corruptCodeRequestHandler(t *testPeer, id uint64, hashes []common.Hash, max int) error {
 	var bytecodes [][]byte
 	for _, h := range hashes {
@@ -2589,6 +2583,96 @@ func TestFetchAccessListsPeerDrop(t *testing.T) {
 	}
 	if len(results) != 1 {
 		t.Fatalf("result count mismatch: got %d, want 1", len(results))
+	}
+}
+
+// TestFetchAccessListsShortResponse verifies that when a peer returns fewer
+// BALs than requested (a short/partial response), the un-served hashes are
+// retried and eventually all results are collected.
+func TestFetchAccessListsShortResponse(t *testing.T) {
+	t.Parallel()
+	var (
+		once   sync.Once
+		cancel = make(chan struct{})
+		term   = func() { once.Do(func() { close(cancel) }) }
+	)
+
+	// Request 4 hashes but the peer only returns the first 2.
+	hashes := []common.Hash{
+		common.HexToHash("0x01"),
+		common.HexToHash("0x02"),
+		common.HexToHash("0x03"),
+		common.HexToHash("0x04"),
+	}
+	allBALs := make(map[common.Hash]rlp.RawValue)
+	for _, h := range hashes {
+		cb := bal.NewConstructionBlockAccessList()
+		cb.BalanceChange(0, common.HexToAddress("0xaa"), uint256.NewInt(uint64(h[31])))
+		var buf bytes.Buffer
+		if err := cb.EncodeRLP(&buf); err != nil {
+			t.Fatal(err)
+		}
+		allBALs[h] = buf.Bytes()
+	}
+
+	// shortPeer returns only the first 2 BALs regardless of how many are
+	// requested. This simulates a peer that truncates its response (e.g.,
+	// hitting the 2 MiB response soft limit).
+	shortPeer := newTestPeer("short", t, term)
+	shortPeer.accessListRequestHandler = func(tp *testPeer, id uint64, reqHashes []common.Hash, max int) error {
+		// Return only the first 2 of however many were requested.
+		limit := 2
+		if len(reqHashes) < limit {
+			limit = len(reqHashes)
+		}
+		var results []rlp.RawValue
+		for i := 0; i < limit; i++ {
+			results = append(results, allBALs[reqHashes[i]])
+		}
+		rawList, _ := rlp.EncodeToRawList(results)
+		if err := tp.remote.OnAccessLists(tp, id, rawList); err != nil {
+			tp.test.Errorf("delivery rejected: %v", err)
+			tp.term()
+		}
+		return nil
+	}
+	syncer := setupSyncer(rawdb.HashScheme, shortPeer)
+
+	// Pre-seed the rate tracker so the peer's capacity for AccessListsMsg is
+	// high enough to get all 4 hashes assigned in a single request. Without
+	// this, the default capacity is 1, so the peer would only get 1 hash per
+	// round and the short-response scenario never triggers.
+	syncer.rates.Update(shortPeer.id, AccessListsMsg, time.Millisecond, 100)
+
+	// If the bug exists, this will hang.
+	done := make(chan struct{})
+	var (
+		results  []rlp.RawValue
+		fetchErr error
+	)
+	go func() {
+		results, fetchErr = syncer.fetchAccessLists(hashes, cancel)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// fetchAccessLists returned
+	case <-time.After(5 * time.Second):
+		t.Fatal("fetchAccessLists has hung. This means unserved hashes were never re-added to pending.")
+	}
+	if fetchErr != nil {
+		t.Fatalf("fetchAccessLists failed: %v", fetchErr)
+	}
+	if len(results) != len(hashes) {
+		t.Fatalf("result count mismatch: got %d, want %d", len(results), len(hashes))
+	}
+
+	// Verify all results are non-nil and in correct order
+	for i, h := range hashes {
+		if results[i] == nil {
+			t.Errorf("result %d (hash %v) is nil", i, h)
+		}
 	}
 }
 
