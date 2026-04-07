@@ -296,7 +296,8 @@ func defaultAccessListRequestHandler(t *testPeer, id uint64, hashes []common.Has
 			}
 		}
 	}
-	if err := t.remote.OnAccessLists(t, id, results); err != nil {
+	rawList, _ := rlp.EncodeToRawList(results)
+	if err := t.remote.OnAccessLists(t, id, rawList); err != nil {
 		t.test.Errorf("Remote side rejected our delivery: %v", err)
 		t.term()
 	}
