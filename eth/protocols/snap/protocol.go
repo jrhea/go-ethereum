@@ -225,12 +225,6 @@ type GetAccessListsPacket struct {
 	Bytes  uint64        // Soft limit at which to stop returning data
 }
 
-// accessListsInput is the raw RLP decoding type for AccessListsMsg,
-type accessListsInput struct {
-	ID          uint64                    // ID of the request this is a response for
-	AccessLists rlp.RawList[rlp.RawValue] // Requested BALs
-}
-
 // AccessListsPacket is the response to GetAccessListsPacket.
 // Each entry corresponds to the requested hash at the same index.
 // Empty entries indicate the BAL is unavailable.
