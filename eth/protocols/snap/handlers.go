@@ -609,9 +609,5 @@ func handleAccessLists(backend Backend, msg Decoder, peer *Peer) error {
 	if err := peer.tracker.Fulfil(tresp); err != nil {
 		return fmt.Errorf("BALs: %w", err)
 	}
-	bals, err := res.AccessLists.Items()
-	if err != nil {
-		return fmt.Errorf("BALs: %w", err)
-	}
-	return backend.Handle(peer, &AccessListsPacket{res.ID, bals})
+	return backend.Handle(peer, &AccessListsPacket{res.ID, res.AccessLists})
 }

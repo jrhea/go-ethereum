@@ -363,6 +363,7 @@ func (dlp *downloadTesterPeer) RequestAccessLists(id uint64, hashes []common.Has
 	req := &snap.GetAccessListsPacket{
 		ID:     id,
 		Hashes: hashes,
+		Bytes:  uint64(bytes),
 	}
 	als := snap.ServiceGetAccessListsQuery(dlp.chain, req)
 	go dlp.dl.downloader.SnapSyncer.OnAccessLists(dlp, id, als)

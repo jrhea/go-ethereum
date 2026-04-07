@@ -168,5 +168,6 @@ func (p *Peer) RequestAccessLists(id uint64, hashes []common.Hash, bytes int) er
 	return p2p.Send(p.rw, GetAccessListsMsg, &GetAccessListsPacket{
 		ID:     id,
 		Hashes: hashes,
+		Bytes:  uint64(bytes),
 	})
 }

@@ -519,8 +519,10 @@ func (s *Syncer) Sync(root common.Hash, number uint64, cancel chan struct{}) err
 	// Sync loop
 	log.Info("Starting state download", "root", root)
 	for {
+		// Download: fetch all required state data
 		err := s.download(cancel)
 		if err == errPivotStale {
+			// Pivot moved: catch up to new pivot
 			if err := s.catchUp(cancel); err != nil {
 				return err
 			}
@@ -528,6 +530,11 @@ func (s *Syncer) Sync(root common.Hash, number uint64, cancel chan struct{}) err
 			log.Info("Resuming state download", "root", root)
 			continue
 		}
+
+		// Download error that isn't a stale pivot. This is typically due to
+		// the downloader cancelling the sync because the pivot moved. This
+		// error propagates to the downloader which will restart the sync with
+		// a new root.
 		if err != nil {
 			return err
 		}
@@ -540,7 +547,7 @@ func (s *Syncer) Sync(root common.Hash, number uint64, cancel chan struct{}) err
 		}
 		log.Info("Trie rebuild complete", "root", root)
 
-		// All phases complete. Clear persisted status so we don't re-run.
+		// Sync complete: clear persisted status so we don't re-run.
 		// Set syncComplete to prevent the deferred saveSyncStatus from
 		// overwriting the nil.
 		syncComplete = true
@@ -682,6 +689,7 @@ func (s *Syncer) catchUp(cancel chan struct{}) error {
 		if err := rlp.DecodeBytes(raw, &bal); err != nil {
 			return fmt.Errorf("failed to decode BAL for block %d: %v", num, err)
 		}
+
 		// Verify against the block header
 		header := rawdb.ReadHeader(s.db, hash, num)
 		if header == nil {
@@ -690,6 +698,7 @@ func (s *Syncer) catchUp(cancel chan struct{}) error {
 		if err := verifyAccessList(&bal, header); err != nil {
 			return fmt.Errorf("BAL verification failed for block %d: %v", num, err)
 		}
+
 		// Apply the state diffs
 		if err := s.applyAccessList(&bal); err != nil {
 			return fmt.Errorf("BAL application failed for block %d: %v", num, err)
@@ -798,7 +807,7 @@ func (s *Syncer) assignAccessListTasks(pending map[common.Hash]struct{}, success
 		}
 
 		// Collect hashes to fetch, capped by peer capacity and the
-		// EIP-8189 2 MiB response soft limit (~72 KiB/BAL → 28 blocks).
+		// EIP-8189 2 MiB response soft limit (~72 KiB/BAL -> 28 blocks).
 		if cap > maxAccessListRequestCount {
 			cap = maxAccessListRequestCount
 		}
@@ -833,7 +842,7 @@ func (s *Syncer) assignAccessListTasks(pending map[common.Hash]struct{}, success
 			defer s.pend.Done()
 
 			// Attempt to send the remote request and revert if it fails
-			if err := peer.RequestAccessLists(reqid, batch, maxRequestSize); err != nil {
+			if err := peer.RequestAccessLists(reqid, batch, softResponseLimit); err != nil {
 				log.Debug("Failed to request access lists", "err", err)
 				s.scheduleRevertAccessListRequest(req)
 			}
@@ -2300,13 +2309,20 @@ func (s *Syncer) OnStorage(peer SyncPeer, id uint64, hashes [][]common.Hash, slo
 
 // OnAccessLists is a callback method to invoke when a batch of access lists
 // are received from a remote peer.
-func (s *Syncer) OnAccessLists(peer SyncPeer, id uint64, accessLists []rlp.RawValue) error {
+func (s *Syncer) OnAccessLists(peer SyncPeer, id uint64, accessLists rlp.RawList[rlp.RawValue]) error {
+	// Convert RawList to slice of raw values
+	bals, err := accessLists.Items()
+	if err != nil {
+		return err
+	}
+
+	// Calculate total size of returned data
 	var size common.StorageSize
-	for _, bal := range accessLists {
+	for _, bal := range bals {
 		size += common.StorageSize(len(bal))
 	}
 	logger := peer.Log().New("reqid", id)
-	logger.Trace("Delivering set of BALs", "count", len(accessLists), "bytes", size)
+	logger.Trace("Delivering set of BALs", "count", len(bals), "bytes", size)
 
 	// Whether or not the response is valid, we can mark the peer as idle and
 	// notify the scheduler to assign a new task. If the response is invalid,
@@ -2333,7 +2349,7 @@ func (s *Syncer) OnAccessLists(peer SyncPeer, id uint64, accessLists []rlp.RawVa
 		return nil
 	}
 	delete(s.accessListReqs, id)
-	s.rates.Update(peer.ID(), AccessListsMsg, time.Since(req.time), len(accessLists))
+	s.rates.Update(peer.ID(), AccessListsMsg, time.Since(req.time), len(bals))
 
 	// Clean up the request timeout timer
 	if !req.timeout.Stop() {
@@ -2344,7 +2360,7 @@ func (s *Syncer) OnAccessLists(peer SyncPeer, id uint64, accessLists []rlp.RawVa
 
 	// Response is valid, but check if peer is signalling that it does not have
 	// the requested data.
-	if len(accessLists) == 0 {
+	if len(bals) == 0 {
 		logger.Debug("Peer rejected access list request")
 		s.statelessPeers[peer.ID()] = struct{}{}
 		s.lock.Unlock()
@@ -2358,7 +2374,7 @@ func (s *Syncer) OnAccessLists(peer SyncPeer, id uint64, accessLists []rlp.RawVa
 	// Response validated, send it to the scheduler for filling.
 	response := &accessListResponse{
 		req:         req,
-		accessLists: accessLists,
+		accessLists: bals,
 	}
 	select {
 	case req.deliver <- response:
