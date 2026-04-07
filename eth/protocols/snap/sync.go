@@ -583,7 +583,6 @@ func (s *Syncer) download(cancel chan struct{}) error {
 		bytecodeResps    = make(chan *bytecodeResponse)
 	)
 	for {
-
 		// Remove all completed tasks and terminate if everything's done
 		s.cleanStorageTasks()
 		s.cleanAccountTasks()
