@@ -251,3 +251,46 @@ func TestAccessListApplicationNewAccount(t *testing.T) {
 		t.Errorf("storage wrong: got %x, want %x", storageVal, common.HexToHash("0xff").Bytes())
 	}
 }
+
+// TestAccessListApplicationSameTxCreateDestroy tests the edge case where an
+// account is created and self-destructed in the same transaction during the
+// pivot gap. Per EIP-7928, such accounts appear in the BAL with a balance
+// change to zero but no nonce or code changes. Since the account didn't exist
+// at the old pivot and doesn't exist at the new pivot (destroyed),
+// applyAccessList should not leave a zero-balance account in the snapshot.
+// Per EIP-161, empty accounts (zero balance, zero nonce, no code) must not exist
+// in state.
+func TestAccessListApplicationSameTxCreateDestroy(t *testing.T) {
+	t.Parallel()
+	db := rawdb.NewMemoryDatabase()
+	syncer := NewSyncer(db, rawdb.HashScheme)
+	addr := common.HexToAddress("0x04")
+	accountHash := crypto.Keccak256Hash(addr[:])
+
+	// Verify account doesn't exist before apply
+	if data := rawdb.ReadAccountSnapshot(db, accountHash); len(data) > 0 {
+		t.Fatal("account should not exist yet")
+	}
+
+	// Build a BAL mimicking same-tx create+destroy: the account appears
+	// with a balance change to zero and nothing else.
+	cb := bal.NewConstructionBlockAccessList()
+	cb.BalanceChange(0, addr, uint256.NewInt(0))
+	b := buildTestBAL(t, &cb)
+	if err := syncer.applyAccessList(b); err != nil {
+		t.Fatalf("applyAccessList failed: %v", err)
+	}
+
+	// Check if applyAccessList created an account.
+	data := rawdb.ReadAccountSnapshot(db, accountHash)
+	if len(data) > 0 {
+		// Account was created
+		account, err := types.FullAccount(data)
+		if err != nil {
+			t.Fatalf("failed to decode account: %v", err)
+		}
+		t.Errorf("account created for same-tx create+destroy: "+
+			"balance=%v, nonce=%d, codeHash=%x, root=%v",
+			account.Balance, account.Nonce, account.CodeHash, account.Root)
+	}
+}
