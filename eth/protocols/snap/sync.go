@@ -660,6 +660,16 @@ func (s *Syncer) catchUp(cancel chan struct{}) error {
 	from := s.previousNumber + 1
 	to := s.number
 
+	// The new pivot must be ahead of the old one. This can
+	// fail if a reorg replaced the block at the pivot height (same number,
+	// different root) or if a deep reorg shortened the chain past the old
+	// pivot. In either case, catch-up can't roll forward, so wipe progress
+	// and let the caller restart with a fresh sync.
+	if from > to {
+		log.Warn("Catch-up range inverted, wiping sync progress", "from", from, "to", to)
+		rawdb.WriteSnapshotSyncStatus(s.db, nil)
+		return fmt.Errorf("catch-up range inverted (from %d > to %d): pivot reorged", from, to)
+	}
 	log.Info("Starting access list catch-up", "from", from, "to", to, "blocks", to-from+1)
 
 	// Collect block hashes for the gap range

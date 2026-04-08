@@ -1979,6 +1979,33 @@ func TestNoPivotMoveOnSameRoot(t *testing.T) {
 	}
 }
 
+// TestCatchUpInvertedRange verifies that catchUp returns an error and wipes
+// sync progress when the new pivot is at the same (or lower) block number as
+// the old pivot..
+func TestCatchUpInvertedRange(t *testing.T) {
+	t.Parallel()
+	db := rawdb.NewMemoryDatabase()
+	syncer := NewSyncer(db, rawdb.HashScheme)
+
+	// Simulate: old pivot at block 100, new pivot at block 100 (same number,
+	// different root). This happens when a reorg replaces the pivot block.
+	syncer.previousNumber = 100
+	syncer.number = 100
+
+	// Write some sync progress so we can verify it gets wiped
+	rawdb.WriteSnapshotSyncStatus(db, []byte("some progress"))
+	cancel := make(chan struct{})
+	err := syncer.catchUp(cancel)
+	if err == nil {
+		t.Fatal("expected error from catchUp with inverted range")
+	}
+
+	// Verify sync progress was wiped
+	if status := rawdb.ReadSnapshotSyncStatus(db); status != nil {
+		t.Fatal("sync progress should be wiped after inverted catch-up range")
+	}
+}
+
 // TestFlatStateDownload verifies that download() writes flat state to disk
 // and makes no trie node requests.
 func TestFlatStateDownload(t *testing.T) {
