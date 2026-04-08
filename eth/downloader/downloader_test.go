@@ -703,34 +703,60 @@ func testSyncProgress(t *testing.T, protocol uint, mode SyncMode) {
 // TestDeepReorgDetection verifies that checkDeepReorg correctly identifies
 // when the canonical chain has reorged past the old pivot.
 func TestDeepReorgDetection(t *testing.T) {
-	db := rawdb.NewMemoryDatabase()
-	pivotNumber := uint64(100)
-	pivotRoot := common.HexToHash("0xaaaa")
-	reorgedRoot := common.HexToHash("0xbbbb")
+	t.Parallel()
 
-	// Write a header at the pivot number with a different root (simulating reorg)
-	header := &types.Header{
-		Number:     new(big.Int).SetUint64(pivotNumber),
-		Root:       reorgedRoot,
-		Difficulty: common.Big0,
-	}
-	rawdb.WriteHeader(db, header)
-	rawdb.WriteCanonicalHash(db, header.Hash(), pivotNumber)
+	// Case 1: Chain reorged to a shorter fork — old pivot number no longer
+	// has a canonical hash. checkDeepReorg returns false (can't confirm reorg
+	// without data). The syncer's catchUp guard handles this case instead
+	// (see TestCatchUpInvertedRange in eth/protocols/snap/sync_test.go).
+	t.Run("ShorterChain", func(t *testing.T) {
+		db := rawdb.NewMemoryDatabase()
+		// No canonical hash written at block 100 — chain is shorter
+		if checkDeepReorg(db, 100, common.HexToHash("0xaaaa")) {
+			t.Fatal("should not detect reorg when canonical hash is missing")
+		}
+	})
 
-	// Should detect reorg: canonical root differs from our pivot root
-	if !checkDeepReorg(db, pivotNumber, pivotRoot) {
-		t.Fatal("expected deep reorg detection when roots differ")
-	}
+	// Case 2: Chain reorged to a same-length (or longer) fork — old pivot
+	// number exists but has a different state root. checkDeepReorg detects it.
+	t.Run("DifferentRoot", func(t *testing.T) {
+		db := rawdb.NewMemoryDatabase()
+		pivotNumber := uint64(100)
+		pivotRoot := common.HexToHash("0xaaaa")
+		reorgedRoot := common.HexToHash("0xbbbb")
 
-	// Should NOT detect reorg: canonical root matches our pivot root
-	if checkDeepReorg(db, pivotNumber, reorgedRoot) {
-		t.Fatal("should not detect reorg when roots match")
-	}
+		header := &types.Header{
+			Number:     new(big.Int).SetUint64(pivotNumber),
+			Root:       reorgedRoot,
+			Difficulty: common.Big0,
+		}
+		rawdb.WriteHeader(db, header)
+		rawdb.WriteCanonicalHash(db, header.Hash(), pivotNumber)
 
-	// Should NOT detect reorg: no canonical hash at that number
-	if checkDeepReorg(db, 999, pivotRoot) {
-		t.Fatal("should not detect reorg when block number is unknown")
-	}
+		if !checkDeepReorg(db, pivotNumber, pivotRoot) {
+			t.Fatal("expected deep reorg detection when roots differ")
+		}
+	})
+
+	// Case 3: Same block at old pivot — no reorg at the pivot level.
+	// Blocks above may differ, but catch-up handles that normally.
+	t.Run("SameRoot", func(t *testing.T) {
+		db := rawdb.NewMemoryDatabase()
+		pivotNumber := uint64(100)
+		pivotRoot := common.HexToHash("0xaaaa")
+
+		header := &types.Header{
+			Number:     new(big.Int).SetUint64(pivotNumber),
+			Root:       pivotRoot,
+			Difficulty: common.Big0,
+		}
+		rawdb.WriteHeader(db, header)
+		rawdb.WriteCanonicalHash(db, header.Hash(), pivotNumber)
+
+		if checkDeepReorg(db, pivotNumber, pivotRoot) {
+			t.Fatal("should not detect reorg when roots match")
+		}
+	})
 }
 
 // TestDeepReorgWipesProgress verifies that when a deep reorg is detected,

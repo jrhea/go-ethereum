@@ -332,10 +332,10 @@ type SyncPeer interface {
 	Log() log.Logger
 }
 
-// Syncer is an Ethereum account and storage trie syncer based on snapshots and
-// the  snap protocol. It's purpose is to download all the accounts and storage
-// slots from remote peers and reassemble chunks of the state trie, on top of
-// which a state sync can be run to fix any gaps / overlaps.
+// Syncer is an Ethereum account and storage trie syncer based on the snap
+// protocol. It downloads all accounts, storage slots, and bytecodes from
+// remote peers as flat state, applies BAL diffs on pivot moves,
+// and triggers a final trie rebuild once flat state is consistent.
 //
 // Every network request has a variety of failure events:
 //   - The peer disconnects after task assignment, failing to send the request
@@ -657,14 +657,21 @@ func (s *Syncer) resetDownload(root common.Hash, number uint64) {
 // root), it fetches BALs for the gap blocks, verifies them against
 // block headers, and applies the diffs to roll flat state forward.
 func (s *Syncer) catchUp(cancel chan struct{}) error {
+	s.lock.RLock()
 	from := s.previousNumber + 1
 	to := s.number
+	s.lock.RUnlock()
 
-	// The new pivot must be ahead of the old one. This can
-	// fail if a reorg replaced the block at the pivot height (same number,
-	// different root) or if a deep reorg shortened the chain past the old
-	// pivot. In either case, catch-up can't roll forward, so wipe progress
-	// and let the caller restart with a fresh sync.
+	// The new pivot must be ahead of the old one. This can fail if a reorg
+	// replaced the block at the pivot height (same number, different root)
+	// or if a deep reorg shortened the chain past the old pivot. In either
+	// case, catch-up can't roll forward, so wipe progress and return an
+	// error so the caller restarts with a fresh sync.
+	//
+	// Note: this check lives here rather than in checkDeepReorg because
+	// catchUp is reached both when the downloader actively moves the pivot
+	// (via restartSnapSync) and when the syncer resumes from persisted
+	// progress after a restart. checkDeepReorg only covers the former.
 	if from > to {
 		log.Warn("Catch-up range inverted, wiping sync progress", "from", from, "to", to)
 		rawdb.WriteSnapshotSyncStatus(s.db, nil)
@@ -1921,7 +1928,7 @@ func (s *Syncer) forwardAccountTask(task *accountTask) {
 
 	// Persist the received account segments. These flat state maybe
 	// outdated during the sync, but it can be fixed later during the
-	// snapshot generation.
+	// trie rebuild.
 	oldAccountBytes := s.accountBytes
 
 	batch := ethdb.HookedBatch{

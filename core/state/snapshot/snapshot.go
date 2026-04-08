@@ -733,12 +733,10 @@ func (t *Tree) Rebuild(root common.Hash) {
 func (t *Tree) RebuildFromSyncedState(root common.Hash) {
 	t.lock.Lock()
 	defer t.lock.Unlock()
-
 	rawdb.DeleteSnapshotRecoveryNumber(t.diskdb)
 	rawdb.DeleteSnapshotDisabled(t.diskdb)
 	rawdb.WriteSnapshotRoot(t.diskdb, root)
 	journalProgress(t.diskdb, nil, nil)
-
 	log.Info("Setting up snapshot from synced state", "root", root)
 	t.layers = map[common.Hash]snapshot{
 		root: &diskLayer{

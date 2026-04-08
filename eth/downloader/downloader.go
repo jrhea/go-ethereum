@@ -872,6 +872,11 @@ func (d *Downloader) importBlockResults(results []*fetchResult) error {
 // the old pivot's block number has a different state root, the syncer's flat
 // state is from the old fork and must be wiped. Returns true if a deep reorg
 // was detected.
+//
+// Returns false (no reorg) when the canonical hash or header is missing. This
+// avoids false positives from pruned or not-yet-downloaded data. If the chain
+// really did shorten past the old pivot, sync.catchUp's from > to guard will
+// catch this.
 func checkDeepReorg(db ethdb.Database, oldNumber uint64, oldRoot common.Hash) bool {
 	oldHash := rawdb.ReadCanonicalHash(db, oldNumber)
 	if oldHash == (common.Hash{}) {
