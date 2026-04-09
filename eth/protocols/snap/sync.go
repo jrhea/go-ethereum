@@ -745,8 +745,6 @@ func (s *Syncer) fetchAccessLists(hashes []common.Hash, cancel chan struct{}) ([
 		pending[h] = struct{}{}
 	}
 	fetched := make(map[common.Hash]rlp.RawValue, len(hashes))
-
-	// Create ephemeral channels for this fetch cycle
 	var (
 		accessListReqFails = make(chan *accessListRequest)
 		accessListResps    = make(chan *accessListResponse)
@@ -785,6 +783,7 @@ func (s *Syncer) fetchAccessLists(hashes []common.Hash, cancel chan struct{}) ([
 			s.processAccessListResponse(res, pending, fetched)
 		}
 	}
+
 	// Assemble results in input order
 	results := make([]rlp.RawValue, len(hashes))
 	for i, h := range hashes {
@@ -869,15 +868,19 @@ func (s *Syncer) assignAccessListTasks(pending map[common.Hash]struct{}, success
 // processAccessListResponse handles a successful access list response by
 // matching results to pending hashes and storing them.
 func (s *Syncer) processAccessListResponse(res *accessListResponse, pending map[common.Hash]struct{}, fetched map[common.Hash]rlp.RawValue) {
-	// Each response entry corresponds to the requested hash at the same index
+	// Each response entry corresponds to the requested hash at the same index.
 	for i, raw := range res.accessLists {
-		if i >= len(res.req.hashes) {
-			break
-		}
 		h := res.req.hashes[i]
+
+		// Peer doesn't have this BAL. Add it back to pending for retry.
+		if bytes.Equal(raw, rlp.EmptyString) {
+			pending[h] = struct{}{}
+			continue
+		}
 		fetched[h] = raw
 		delete(pending, h)
 	}
+
 	// Re-add hashes that were not served back to pending
 	for i := len(res.accessLists); i < len(res.req.hashes); i++ {
 		pending[res.req.hashes[i]] = struct{}{}
@@ -2387,6 +2390,12 @@ func (s *Syncer) OnAccessLists(peer SyncPeer, id uint64, accessLists rlp.RawList
 		// Signal this request as failed, and ready for rescheduling
 		s.scheduleRevertAccessListRequest(req)
 		return nil
+	}
+	if len(bals) > len(req.hashes) {
+		s.lock.Unlock()
+		s.scheduleRevertAccessListRequest(req)
+		logger.Warn("Peer sent more BALs than requested", "count", len(bals), "requested", len(req.hashes))
+		return errors.New("more BALs than requested")
 	}
 	s.lock.Unlock()
 

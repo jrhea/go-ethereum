@@ -2703,6 +2703,91 @@ func TestFetchAccessListsShortResponse(t *testing.T) {
 	}
 }
 
+// TestFetchAccessListsEmptyPlaceholder verifies that when a peer returns
+// rlp.EmptyString placeholders for BALs it doesn't have, those placeholders
+// are not silently accepted as valid results.
+func TestFetchAccessListsEmptyPlaceholder(t *testing.T) {
+	t.Parallel()
+	var (
+		once   sync.Once
+		cancel = make(chan struct{})
+		term   = func() { once.Do(func() { close(cancel) }) }
+	)
+	hashes := []common.Hash{
+		common.HexToHash("0x01"),
+		common.HexToHash("0x02"),
+		common.HexToHash("0x03"),
+	}
+
+	// Build BALs for all 3 hashes
+	allBALs := make(map[common.Hash]rlp.RawValue)
+	for _, h := range hashes {
+		cb := bal.NewConstructionBlockAccessList()
+		cb.BalanceChange(0, common.HexToAddress("0xaa"), uint256.NewInt(uint64(h[31])))
+		var buf bytes.Buffer
+		if err := cb.EncodeRLP(&buf); err != nil {
+			t.Fatal(err)
+		}
+		allBALs[h] = buf.Bytes()
+	}
+
+	// partialPeer has BALs for hashes 0 and 2. The server
+	// handler returns rlp.EmptyString for the missing BAL.
+	partialPeer := newTestPeer("partial", t, term)
+	partialPeer.accessListRequestHandler = func(tp *testPeer, id uint64, reqHashes []common.Hash, max int) error {
+		var results []rlp.RawValue
+		for _, h := range reqHashes {
+			if raw, ok := allBALs[h]; ok && h != hashes[1] {
+				results = append(results, raw)
+			} else {
+				results = append(results, rlp.EmptyString)
+			}
+		}
+		rawList, _ := rlp.EncodeToRawList(results)
+		if err := tp.remote.OnAccessLists(tp, id, rawList); err != nil {
+			tp.test.Errorf("delivery rejected: %v", err)
+			tp.term()
+		}
+		return nil
+	}
+
+	// fullPeer has all BALs
+	fullPeer := newTestPeer("full", t, term)
+	fullPeer.accessLists = allBALs
+	syncer := setupSyncer(rawdb.HashScheme, partialPeer, fullPeer)
+
+	// Pre-seed capacity so partialPeer gets all 3 hashes
+	syncer.rates.Update(partialPeer.id, AccessListsMsg, time.Millisecond, 100)
+	done := make(chan struct{})
+	var (
+		results  []rlp.RawValue
+		fetchErr error
+	)
+	go func() {
+		results, fetchErr = syncer.fetchAccessLists(hashes, cancel)
+		close(done)
+	}()
+
+	// Wait for fetch to complete
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fetchAccessLists hung")
+	}
+	if fetchErr != nil {
+		t.Fatalf("fetchAccessLists failed: %v", fetchErr)
+	}
+
+	// Verify the results are valid.
+	for i, raw := range results {
+		var accessList bal.BlockAccessList
+		if err := rlp.DecodeBytes(raw, &accessList); err != nil {
+			t.Errorf("result %d (hash %v) is not a valid BAL: %v (got raw bytes %x)",
+				i, hashes[i], err, raw)
+		}
+	}
+}
+
 func newDbConfig(scheme string) *triedb.Config {
 	if scheme == rawdb.HashScheme {
 		return &triedb.Config{}
