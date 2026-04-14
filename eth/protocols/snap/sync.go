@@ -662,16 +662,11 @@ func (s *Syncer) catchUp(cancel chan struct{}) error {
 	to := s.number
 	s.lock.RUnlock()
 
-	// The new pivot must be ahead of the old one. This can fail if a reorg
-	// replaced the block at the pivot height (same number, different root)
-	// or if a deep reorg shortened the chain past the old pivot. In either
-	// case, catch-up can't roll forward, so wipe progress and return an
-	// error so the caller restarts with a fresh sync.
-	//
-	// Note: this check lives here rather than in checkDeepReorg because
-	// catchUp is reached both when the downloader actively moves the pivot
-	// (via restartSnapSync) and when the syncer resumes from persisted
-	// progress after a restart. checkDeepReorg only covers the former.
+	// The new pivot must be ahead of the old one. If the chain shortened
+	// past the old pivot (deep reorg), the range is inverted. Wipe progress
+	// and restart. This also catches reorgs missed by checkDeepReorg (which
+	// only runs when the downloader actively restarts the syncer, not on
+	// resume from persisted progress).
 	if from > to {
 		log.Warn("Catch-up range inverted, wiping sync progress", "from", from, "to", to)
 		rawdb.WriteSnapshotSyncStatus(s.db, nil)
