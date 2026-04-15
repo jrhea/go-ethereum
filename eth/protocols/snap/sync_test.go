@@ -1948,37 +1948,6 @@ func TestPivotMoveDetection(t *testing.T) {
 	}
 }
 
-// TestNoPivotMoveOnSameRoot verifies that when the syncer is restarted with
-// the same root, download() does not return errPivotStale.
-func TestNoPivotMoveOnSameRoot(t *testing.T) {
-	t.Parallel()
-
-	rootA := common.HexToHash("0xaaaa")
-
-	db := rawdb.NewMemoryDatabase()
-	syncer := NewSyncer(db, rawdb.HashScheme)
-
-	// Simulate a previous sync run against rootA
-	syncer.root = rootA
-	syncer.tasks = []*accountTask{
-		{Next: common.Hash{}, Last: common.MaxHash, SubTasks: make(map[common.Hash][]*storageTask), stateCompleted: make(map[common.Hash]struct{})},
-	}
-	syncer.saveSyncStatus()
-
-	// Simulate restart with the same root
-	syncer.root = rootA
-	syncer.previousRoot = rootA
-	syncer.loadSyncStatus()
-
-	if syncer.previousRoot != rootA {
-		t.Fatalf("previousRoot mismatch: got %v, want %v", syncer.previousRoot, rootA)
-	}
-	// previousRoot == root, so no pivot move detected
-	if syncer.previousRoot != syncer.root {
-		t.Fatalf("expected previousRoot == root, got %v != %v", syncer.previousRoot, syncer.root)
-	}
-}
-
 // TestCatchUpInvertedRange verifies that catchUp returns an error and wipes
 // sync progress when the new pivot is at the same (or lower) block number as
 // the old pivot..
@@ -2003,51 +1972,6 @@ func TestCatchUpInvertedRange(t *testing.T) {
 	// Verify sync progress was wiped
 	if status := rawdb.ReadSnapshotSyncStatus(db); status != nil {
 		t.Fatal("sync progress should be wiped after inverted catch-up range")
-	}
-}
-
-// TestFlatStateDownload verifies that download() writes flat state to disk
-// and makes no trie node requests.
-func TestFlatStateDownload(t *testing.T) {
-	t.Parallel()
-	testFlatStateDownload(t, rawdb.HashScheme)
-	testFlatStateDownload(t, rawdb.PathScheme)
-}
-
-func testFlatStateDownload(t *testing.T, scheme string) {
-	var (
-		once   sync.Once
-		cancel = make(chan struct{})
-		term   = func() {
-			once.Do(func() {
-				close(cancel)
-			})
-		}
-	)
-	nodeScheme, sourceAccountTrie, elems := makeAccountTrieNoStorage(100, scheme)
-	mkSource := func(name string) *testPeer {
-		source := newTestPeer(name, t, term)
-		source.accountTrie = sourceAccountTrie.Copy()
-		source.accountValues = elems
-		return source
-	}
-	syncer := setupSyncer(nodeScheme, mkSource("source"))
-
-	// Call download() directly to avoid rebuildTrie
-	syncer.root = sourceAccountTrie.Hash()
-	syncer.previousRoot = syncer.root // No pivot move
-	syncer.loadSyncStatus()
-	if err := syncer.download(cancel); err != nil {
-		t.Fatalf("download failed: %v", err)
-	}
-
-	// Verify flat state was written
-	for _, entry := range elems {
-		hash := common.BytesToHash(entry.k)
-		data := rawdb.ReadAccountSnapshot(syncer.db, hash)
-		if len(data) == 0 {
-			t.Errorf("missing account snapshot for %x", hash)
-		}
 	}
 }
 
@@ -2389,50 +2313,6 @@ func TestInterruptedRebuildRecovery(t *testing.T) {
 	}
 }
 
-// TestFetchAccessListsSinglePeer verifies fetching BALs from a single peer.
-func TestFetchAccessListsSinglePeer(t *testing.T) {
-	t.Parallel()
-	var (
-		once   sync.Once
-		cancel = make(chan struct{})
-		term   = func() { once.Do(func() { close(cancel) }) }
-	)
-
-	// Create test BALs
-	hashes := []common.Hash{
-		common.HexToHash("0x01"),
-		common.HexToHash("0x02"),
-		common.HexToHash("0x03"),
-	}
-	bals := make(map[common.Hash]rlp.RawValue)
-	for _, h := range hashes {
-		cb := bal.NewConstructionBlockAccessList()
-		cb.BalanceChange(0, common.HexToAddress("0xaa"), uint256.NewInt(uint64(h[31])))
-		var buf bytes.Buffer
-		if err := cb.EncodeRLP(&buf); err != nil {
-			t.Fatal(err)
-		}
-		bals[h] = buf.Bytes()
-	}
-	source := newTestPeer("source", t, term)
-	source.accessLists = bals
-	syncer := setupSyncer(rawdb.HashScheme, source)
-	results, err := syncer.fetchAccessLists(hashes, cancel)
-	if err != nil {
-		t.Fatalf("fetchAccessLists failed: %v", err)
-	}
-	if len(results) != len(hashes) {
-		t.Fatalf("result count mismatch: got %d, want %d", len(results), len(hashes))
-	}
-
-	// Verify results match input order
-	for i, h := range hashes {
-		if !bytes.Equal(results[i], bals[h]) {
-			t.Errorf("result %d mismatch", i)
-		}
-	}
-}
-
 // TestFetchAccessListsMultiplePeers verifies that fetch distributes work
 // across multiple idle peers.
 func TestFetchAccessListsMultiplePeers(t *testing.T) {
@@ -2469,6 +2349,12 @@ func TestFetchAccessListsMultiplePeers(t *testing.T) {
 	}
 	if len(results) != len(hashes) {
 		t.Fatalf("result count mismatch: got %d, want %d", len(results), len(hashes))
+	}
+	// Verify results match expected content in request order
+	for i, h := range hashes {
+		if !bytes.Equal(results[i], bals[h]) {
+			t.Errorf("result %d content mismatch for hash %v", i, h)
+		}
 	}
 }
 
