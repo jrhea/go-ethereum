@@ -1912,7 +1912,7 @@ func TestSlotEstimation(t *testing.T) {
 
 // TestPivotMoveDetection verifies that when the syncer is restarted with a
 // different root (simulating the downloader's cancel+restart on pivot move),
-// download() returns errPivotStale immediately.
+// downloadState() returns errPivotStale immediately.
 func TestPivotMoveDetection(t *testing.T) {
 	t.Parallel()
 
@@ -1940,9 +1940,9 @@ func TestPivotMoveDetection(t *testing.T) {
 	if syncer.root != rootB {
 		t.Fatalf("root mismatch: got %v, want %v", syncer.root, rootB)
 	}
-	// download() should detect the mismatch and return errPivotStale
+	// downloadState() should detect the mismatch and return errPivotStale
 	cancel := make(chan struct{})
-	err := syncer.download(cancel)
+	err := syncer.downloadState(cancel)
 	if err != errPivotStale {
 		t.Fatalf("expected errPivotStale, got %v", err)
 	}
@@ -2013,7 +2013,7 @@ func testInterruptedDownloadRecovery(t *testing.T, scheme string) {
 	syncer1.root = root
 	syncer1.previousRoot = root
 	syncer1.loadSyncStatus()
-	syncer1.download(cancel1)
+	syncer1.downloadState(cancel1)
 
 	// Save progress
 	for _, task := range syncer1.tasks {
@@ -2050,7 +2050,7 @@ func testInterruptedDownloadRecovery(t *testing.T, scheme string) {
 	syncer2.root = root
 	syncer2.previousRoot = root
 	syncer2.loadSyncStatus()
-	if err := syncer2.download(cancel2); err != nil {
+	if err := syncer2.downloadState(cancel2); err != nil {
 		t.Fatalf("resumed download failed: %v", err)
 	}
 
@@ -2260,7 +2260,7 @@ func TestInterruptedRebuildRecovery(t *testing.T) {
 	root := sourceAccountTrie.Hash()
 
 	// First run: complete download, save status, simulate interruption
-	// before rebuild by calling download() directly
+	// before rebuild by calling downloadState() directly
 	var (
 		once1   sync.Once
 		cancel1 = make(chan struct{})
@@ -2277,7 +2277,7 @@ func TestInterruptedRebuildRecovery(t *testing.T) {
 	syncer1.previousRoot = root
 	syncer1.loadSyncStatus()
 
-	if err := syncer1.download(cancel1); err != nil {
+	if err := syncer1.downloadState(cancel1); err != nil {
 		t.Fatalf("download failed: %v", err)
 	}
 	// Save status (simulating what Sync's defer does)

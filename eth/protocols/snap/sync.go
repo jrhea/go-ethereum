@@ -520,13 +520,13 @@ func (s *Syncer) Sync(root common.Hash, number uint64, cancel chan struct{}) err
 	log.Info("Starting state download", "root", root)
 	for {
 		// Download: fetch all required state data
-		err := s.download(cancel)
+		err := s.downloadState(cancel)
 		if err == errPivotStale {
 			// Pivot moved: catch up to new pivot
 			if err := s.catchUp(cancel); err != nil {
 				return err
 			}
-			s.resetDownload(root, number)
+			s.resetDownloadState(root, number)
 			log.Info("Resuming state download", "root", root)
 			continue
 		}
@@ -558,7 +558,7 @@ func (s *Syncer) Sync(root common.Hash, number uint64, cancel chan struct{}) err
 
 // download runs the bulk flat-state download. It fetches
 // account ranges, storage slots, and bytecodes, writing flat state to disk.
-func (s *Syncer) download(cancel chan struct{}) error {
+func (s *Syncer) downloadState(cancel chan struct{}) error {
 	// If the pivot moved since the last run (downloader cancelled and restarted
 	// us with a new root), signal catch-up before downloading.
 	if s.previousRoot != s.root {
@@ -638,14 +638,14 @@ func (s *Syncer) download(cancel chan struct{}) error {
 	}
 }
 
-// resetDownload resets the download state for a new pivot after catch-up.
+// resetDownloadState resets the download state for a new pivot after catch-up.
 // It regenerates the task list for accounts not yet downloaded, clears
 // in-flight requests, and updates the root.
-func (s *Syncer) resetDownload(root common.Hash, number uint64) {
+func (s *Syncer) resetDownloadState(root common.Hash, number uint64) {
 	s.lock.Lock()
 	s.root = root
 	s.number = number
-	s.previousRoot = root // Prevent download() from returning errPivotStale again
+	s.previousRoot = root // Prevent downloadState() from returning errPivotStale again
 	s.previousNumber = number
 
 	// Clear stateless peers bc they may be able to serve the new pivot
@@ -662,11 +662,13 @@ func (s *Syncer) catchUp(cancel chan struct{}) error {
 	to := s.number
 	s.lock.RUnlock()
 
-	// The new pivot must be ahead of the old one. If the chain shortened
-	// past the old pivot (deep reorg), the range is inverted. Wipe progress
-	// and restart. This also catches reorgs missed by checkDeepReorg (which
-	// only runs when the downloader actively restarts the syncer, not on
-	// resume from persisted progress).
+	// The new pivot must be ahead of the old one. The range is inverted if
+	// a reorg replaced the block at the pivot height (same number, different
+	// root) or if the chain shortened past the old pivot. In either case,
+	// catch-up can't roll forward — wipe progress and restart. This also
+	// catches reorgs missed by checkDeepReorg, which only runs when the
+	// downloader actively restarts the syncer, not on resume from persisted
+	// progress.
 	if from > to {
 		log.Warn("Catch-up range inverted, wiping sync progress", "from", from, "to", to)
 		rawdb.WriteSnapshotSyncStatus(s.db, nil)
