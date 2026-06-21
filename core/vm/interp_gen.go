@@ -312,6 +312,68 @@ mainLoop:
 				return nil, ErrOutOfGas
 			}
 			contract.Gas.RegularGas -= 3
+			if !isEIP4762 {
+				if cl := uint64(len(scope.Contract.Code)); pc+1 < cl && stack.len() <= 1023 {
+					if scope.Contract.Code[pc+1] == 0x61 && pc+4 < cl && scope.Contract.Code[pc+4] == 0x57 {
+						if contract.Gas.RegularGas < 3 {
+							return nil, ErrOutOfGas
+						}
+						contract.Gas.RegularGas -= 3
+						if contract.Gas.RegularGas < 10 {
+							return nil, ErrOutOfGas
+						}
+						contract.Gas.RegularGas -= 10
+						if evm.abort.Load() {
+							res, err = nil, errStopToken
+							break mainLoop
+						}
+						if cond := scope.Stack.pop1(); cond.IsZero() {
+							udest := uint64(scope.Contract.Code[pc+2])<<8 | uint64(scope.Contract.Code[pc+3])
+							if udest >= cl || OpCode(scope.Contract.Code[udest]) != JUMPDEST || !scope.Contract.isCode(udest) {
+								res, err = nil, ErrInvalidJump
+								break mainLoop
+							}
+							if contract.Gas.RegularGas < 1 {
+								return nil, ErrOutOfGas
+							}
+							contract.Gas.RegularGas -= 1
+							pc = udest + 1
+							continue mainLoop
+						}
+						pc += 5
+						continue mainLoop
+					}
+					if scope.Contract.Code[pc+1] == 0x60 && pc+3 < cl && scope.Contract.Code[pc+3] == 0x57 {
+						if contract.Gas.RegularGas < 3 {
+							return nil, ErrOutOfGas
+						}
+						contract.Gas.RegularGas -= 3
+						if contract.Gas.RegularGas < 10 {
+							return nil, ErrOutOfGas
+						}
+						contract.Gas.RegularGas -= 10
+						if evm.abort.Load() {
+							res, err = nil, errStopToken
+							break mainLoop
+						}
+						if cond := scope.Stack.pop1(); cond.IsZero() {
+							udest := uint64(scope.Contract.Code[pc+2])
+							if udest >= cl || OpCode(scope.Contract.Code[udest]) != JUMPDEST || !scope.Contract.isCode(udest) {
+								res, err = nil, ErrInvalidJump
+								break mainLoop
+							}
+							if contract.Gas.RegularGas < 1 {
+								return nil, ErrOutOfGas
+							}
+							contract.Gas.RegularGas -= 1
+							pc = udest + 1
+							continue mainLoop
+						}
+						pc += 4
+						continue mainLoop
+					}
+				}
+			}
 			x := scope.Stack.peek()
 			if x.IsZero() {
 				x.SetOne()
@@ -538,6 +600,46 @@ mainLoop:
 				return nil, ErrOutOfGas
 			}
 			contract.Gas.RegularGas -= 2
+			if !isEIP4762 {
+				if cl := uint64(len(scope.Contract.Code)); pc+1 < cl {
+					switch scope.Contract.Code[pc+1] {
+					case 0x50: // POP
+						if stack.len() < 2 {
+							break
+						}
+						if contract.Gas.RegularGas < 2 {
+							return nil, ErrOutOfGas
+						}
+						contract.Gas.RegularGas -= 2
+						scope.Stack.drop()
+						scope.Stack.drop()
+						pc += 2
+						continue mainLoop
+					case 0x60: // PUSH1
+						if pc+2 >= cl {
+							break
+						}
+						if contract.Gas.RegularGas < 3 {
+							return nil, ErrOutOfGas
+						}
+						contract.Gas.RegularGas -= 3
+						scope.Stack.peek().SetUint64(uint64(scope.Contract.Code[pc+2]))
+						pc += 3
+						continue mainLoop
+					case 0x61: // PUSH2
+						if pc+3 >= cl {
+							break
+						}
+						if contract.Gas.RegularGas < 3 {
+							return nil, ErrOutOfGas
+						}
+						contract.Gas.RegularGas -= 3
+						scope.Stack.peek().SetUint64(uint64(scope.Contract.Code[pc+2])<<8 | uint64(scope.Contract.Code[pc+3]))
+						pc += 4
+						continue mainLoop
+					}
+				}
+			}
 			scope.Stack.drop()
 			pc++
 			continue mainLoop
@@ -667,10 +769,16 @@ mainLoop:
 				res, err = nil, ErrInvalidJump
 				break mainLoop
 			}
-			pc = pos.Uint64() - 1
-			pc++
+			if isEIP4762 {
+				pc = pos.Uint64()
+				continue mainLoop
+			}
+			if contract.Gas.RegularGas < 1 {
+				return nil, ErrOutOfGas
+			}
+			contract.Gas.RegularGas -= 1
+			pc = pos.Uint64() + 1
 			continue mainLoop
-
 		case JUMPI:
 			if sLen := stack.len(); sLen < 2 {
 				return nil, &ErrStackUnderflow{stackLen: sLen, required: 2}
@@ -685,18 +793,25 @@ mainLoop:
 			}
 			stack.inner.top -= 2
 			stack.size -= 2
-			pos := &stack.inner.data[stack.inner.top+1]
-			cond := &stack.inner.data[stack.inner.top]
+			pos, cond := &stack.inner.data[stack.inner.top+1], &stack.inner.data[stack.inner.top]
 			if !cond.IsZero() {
 				if !scope.Contract.validJumpdest(pos) {
 					res, err = nil, ErrInvalidJump
 					break mainLoop
 				}
-				pc = pos.Uint64() - 1
+				if isEIP4762 {
+					pc = pos.Uint64()
+					continue mainLoop
+				}
+				if contract.Gas.RegularGas < 1 {
+					return nil, ErrOutOfGas
+				}
+				contract.Gas.RegularGas -= 1
+				pc = pos.Uint64() + 1
+				continue mainLoop
 			}
 			pc++
 			continue mainLoop
-
 		case PC:
 			if sLen := stack.len(); sLen > 1023 {
 				return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
@@ -770,6 +885,71 @@ mainLoop:
 				pc++
 				continue mainLoop
 			}
+			if cl := uint64(len(scope.Contract.Code)); pc+2 < cl {
+				switch scope.Contract.Code[pc+2] {
+				case 0x56: // JUMP
+					if contract.Gas.RegularGas < 8 {
+						return nil, ErrOutOfGas
+					}
+					contract.Gas.RegularGas -= 8
+					if evm.abort.Load() {
+						res, err = nil, errStopToken
+						break mainLoop
+					}
+					udest := uint64(scope.Contract.Code[pc+1])
+					if udest >= cl || OpCode(scope.Contract.Code[udest]) != JUMPDEST || !scope.Contract.isCode(udest) {
+						res, err = nil, ErrInvalidJump
+						break mainLoop
+					}
+					if contract.Gas.RegularGas < 1 {
+						return nil, ErrOutOfGas
+					}
+					contract.Gas.RegularGas -= 1
+					pc = udest + 1
+					continue mainLoop
+				case 0x57: // JUMPI
+					if stack.len() < 1 {
+						break
+					}
+					if contract.Gas.RegularGas < 10 {
+						return nil, ErrOutOfGas
+					}
+					contract.Gas.RegularGas -= 10
+					if evm.abort.Load() {
+						res, err = nil, errStopToken
+						break mainLoop
+					}
+					if cond := scope.Stack.pop1(); !cond.IsZero() {
+						udest := uint64(scope.Contract.Code[pc+1])
+						if udest >= cl || OpCode(scope.Contract.Code[udest]) != JUMPDEST || !scope.Contract.isCode(udest) {
+							res, err = nil, ErrInvalidJump
+							break mainLoop
+						}
+						if contract.Gas.RegularGas < 1 {
+							return nil, ErrOutOfGas
+						}
+						contract.Gas.RegularGas -= 1
+						pc = udest + 1
+						continue mainLoop
+					}
+					pc += 3
+					continue mainLoop
+				case 0x60: // PUSH1
+					if pc+3 >= cl || stack.len() > 1022 {
+						break
+					}
+					if contract.Gas.RegularGas < 3 {
+						return nil, ErrOutOfGas
+					}
+					contract.Gas.RegularGas -= 3
+					stack.inner.data[stack.inner.top].SetUint64(uint64(scope.Contract.Code[pc+1]))
+					stack.inner.data[stack.inner.top+1].SetUint64(uint64(scope.Contract.Code[pc+3]))
+					stack.inner.top += 2
+					stack.size += 2
+					pc += 4
+					continue mainLoop
+				}
+			}
 			codeLen := uint64(len(scope.Contract.Code))
 			stack.inner.top++
 			stack.size++
@@ -798,6 +978,57 @@ mainLoop:
 				}
 				pc++
 				continue mainLoop
+			}
+			if cl := uint64(len(scope.Contract.Code)); pc+3 < cl {
+				switch scope.Contract.Code[pc+3] {
+				case 0x56: // JUMP
+					if contract.Gas.RegularGas < 8 {
+						return nil, ErrOutOfGas
+					}
+					contract.Gas.RegularGas -= 8
+					if evm.abort.Load() {
+						res, err = nil, errStopToken
+						break mainLoop
+					}
+					udest := uint64(scope.Contract.Code[pc+1])<<8 | uint64(scope.Contract.Code[pc+2])
+					if udest >= cl || OpCode(scope.Contract.Code[udest]) != JUMPDEST || !scope.Contract.isCode(udest) {
+						res, err = nil, ErrInvalidJump
+						break mainLoop
+					}
+					if contract.Gas.RegularGas < 1 {
+						return nil, ErrOutOfGas
+					}
+					contract.Gas.RegularGas -= 1
+					pc = udest + 1
+					continue mainLoop
+				case 0x57: // JUMPI
+					if stack.len() < 1 {
+						break
+					}
+					if contract.Gas.RegularGas < 10 {
+						return nil, ErrOutOfGas
+					}
+					contract.Gas.RegularGas -= 10
+					if evm.abort.Load() {
+						res, err = nil, errStopToken
+						break mainLoop
+					}
+					if cond := scope.Stack.pop1(); !cond.IsZero() {
+						udest := uint64(scope.Contract.Code[pc+1])<<8 | uint64(scope.Contract.Code[pc+2])
+						if udest >= cl || OpCode(scope.Contract.Code[udest]) != JUMPDEST || !scope.Contract.isCode(udest) {
+							res, err = nil, ErrInvalidJump
+							break mainLoop
+						}
+						if contract.Gas.RegularGas < 1 {
+							return nil, ErrOutOfGas
+						}
+						contract.Gas.RegularGas -= 1
+						pc = udest + 1
+						continue mainLoop
+					}
+					pc += 4
+					continue mainLoop
+				}
 			}
 			codeLen := uint64(len(scope.Contract.Code))
 			stack.inner.top++
@@ -2038,6 +2269,18 @@ mainLoop:
 				return nil, ErrOutOfGas
 			}
 			contract.Gas.RegularGas -= 3
+			if !isEIP4762 {
+				if pc+1 < uint64(len(scope.Contract.Code)) && scope.Contract.Code[pc+1] == 0x50 {
+					if contract.Gas.RegularGas < 2 {
+						return nil, ErrOutOfGas
+					}
+					contract.Gas.RegularGas -= 2
+					v := scope.Stack.pop1()
+					*scope.Stack.back(0) = *v
+					pc += 2
+					continue mainLoop
+				}
+			}
 			stack.inner.data[stack.bottom+stack.size-2], stack.inner.data[stack.bottom+stack.size-1] = stack.inner.data[stack.bottom+stack.size-1], stack.inner.data[stack.bottom+stack.size-2]
 			pc++
 			continue mainLoop
@@ -2049,6 +2292,18 @@ mainLoop:
 				return nil, ErrOutOfGas
 			}
 			contract.Gas.RegularGas -= 3
+			if !isEIP4762 {
+				if pc+1 < uint64(len(scope.Contract.Code)) && scope.Contract.Code[pc+1] == 0x50 {
+					if contract.Gas.RegularGas < 2 {
+						return nil, ErrOutOfGas
+					}
+					contract.Gas.RegularGas -= 2
+					v := scope.Stack.pop1()
+					*scope.Stack.back(1) = *v
+					pc += 2
+					continue mainLoop
+				}
+			}
 			stack.inner.data[stack.bottom+stack.size-3], stack.inner.data[stack.bottom+stack.size-1] = stack.inner.data[stack.bottom+stack.size-1], stack.inner.data[stack.bottom+stack.size-3]
 			pc++
 			continue mainLoop

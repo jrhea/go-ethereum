@@ -178,6 +178,45 @@ var diffPrograms = []struct {
 	{"transient", asm(PUSH1, 0x63, PUSH1, 0x07, TSTORE, PUSH1, 0x07, TLOAD, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
 	{"loop", asm(PUSH1, 0x00, JUMPDEST, PUSH1, 0x01, ADD, DUP1, PUSH1, 0x05, LT, PUSH1, 0x02, JUMPI, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
 	{"jump", asm(PUSH1, 0x06, JUMP, INVALID, INVALID, JUMPDEST, PUSH1, 0x2a, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
+	// The fused PUSH+JUMP/JUMPI fast paths, edge by edge: a valid fused jump,
+	// an invalid destination, a taken and a not taken fused JUMPI in one
+	// program, a JUMPI with no condition on the stack (must fall back and
+	// underflow exactly like the sequential pair), immediate bytes that
+	// contain the JUMP opcode (the peek must look past them), a truncated
+	// PUSH2 at the end of code, running out of gas between the push and the
+	// jump, and a fused jump loop that must still burn gas and terminate.
+	{"fused-push2-jump", asm(PUSH2, 0x00, 0x06, JUMP, INVALID, INVALID, JUMPDEST, PUSH1, 0x2a, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
+	{"fused-push2-jump-invalid", asm(PUSH2, 0x00, 0x04, JUMP, INVALID, INVALID, JUMPDEST, STOP), 100000},
+	{"fused-push2-jumpi-both", asm(PUSH1, 0x01, PUSH2, 0x00, 0x07, JUMPI, INVALID, JUMPDEST, PUSH1, 0x00, PUSH2, 0x00, 0x07, JUMPI, PUSH1, 0x2a, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
+	{"fused-jumpi-empty-stack", asm(PUSH2, 0x00, 0x05, JUMPI, STOP, JUMPDEST, STOP), 100000},
+	{"fused-imm-contains-jump", asm(PUSH2, 0x56, 0x56, POP, PUSH1, 0x2a, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
+	{"push2-truncated", asm(PUSH2, 0x12), 100000},
+	{"fused-jump-oog-mid-pair", asm(PUSH2, 0x00, 0x06, JUMP, INVALID, INVALID, JUMPDEST, STOP), 5},
+	{"fused-jump-loop-oog", asm(JUMPDEST, PUSH1, 0x00, JUMP), 10000},
+	// The pair fusion variants, edge by edge. A taken jump consumes the
+	// JUMPDEST it lands on, so: a jump landing on the last byte of code, and
+	// a jump arriving with gas for the jump but not the destination (gas=11
+	// covers PUSH1+JUMP exactly). POP pairs: drop two, drop into a push of
+	// either width (the replace-the-top shape), a second pop that must
+	// underflow exactly like the sequential pair, and a truncated push after
+	// a pop. SWAP1/SWAP2 followed by POP. The ISZERO PUSH JUMPI triple:
+	// taken, not taken over a garbage destination (skipped exactly like the
+	// sequential ops), an invalid destination, and the PUSH1 form. A double
+	// push with the second immediate truncated.
+	{"jump-land-last-byte", asm(PUSH1, 0x04, JUMP, INVALID, JUMPDEST), 100000},
+	{"jumpdest-oog-after-jump", asm(PUSH1, 0x04, JUMP, INVALID, JUMPDEST, STOP), 11},
+	{"pop-pop", asm(PUSH1, 0x2a, PUSH1, 0x07, PUSH1, 0x08, POP, POP, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
+	{"pop-pop-underflow", asm(PUSH1, 0x01, POP, POP, STOP), 100000},
+	{"pop-push1-replace", asm(PUSH1, 0x11, POP, PUSH1, 0x2a, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
+	{"pop-push2-replace", asm(PUSH1, 0x11, POP, PUSH2, 0x00, 0x2a, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
+	{"pop-push1-truncated", asm(ORIGIN, POP, PUSH1), 100000},
+	{"swap1-pop", asm(PUSH1, 0x05, PUSH1, 0x07, SWAP1, POP, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
+	{"swap2-pop", asm(PUSH1, 0x03, PUSH1, 0x05, PUSH1, 0x07, SWAP2, POP, ADD, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
+	{"iszero-jumpi-taken", asm(PUSH1, 0x00, ISZERO, PUSH2, 0x00, 0x08, JUMPI, INVALID, JUMPDEST, PUSH1, 0x2a, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
+	{"iszero-jumpi-not-taken", asm(PUSH1, 0x01, ISZERO, PUSH2, 0xff, 0xff, JUMPI, PUSH1, 0x2a, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
+	{"iszero-jumpi-invalid-dest", asm(PUSH1, 0x00, ISZERO, PUSH2, 0x00, 0x07, JUMPI, INVALID, STOP), 100000},
+	{"iszero-push1-jumpi", asm(PUSH1, 0x00, ISZERO, PUSH1, 0x07, JUMPI, INVALID, JUMPDEST, STOP), 100000},
+	{"double-push-truncated", asm(PUSH1, 0x01, PUSH1), 100000},
 	{"env", asm(ADDRESS, CALLER, CALLVALUE, ORIGIN, GASPRICE, CODESIZE, GAS, PC, ADD, ADD, ADD, ADD, ADD, ADD, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
 	{"block", asm(NUMBER, TIMESTAMP, COINBASE, GASLIMIT, CHAINID, SELFBALANCE, BASEFEE, DIFFICULTY, ADD, ADD, ADD, ADD, ADD, ADD, ADD, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
 	{"calldata", asm(PUSH1, 0x00, CALLDATALOAD, CALLDATASIZE, PUSH1, 0x00, PUSH1, 0x00, CALLDATACOPY, ADD, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
