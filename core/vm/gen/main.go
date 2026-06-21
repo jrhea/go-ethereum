@@ -581,6 +581,19 @@ func (g *generator) emitGasCheck(m opMeta) {
 	`, m.constGas, m.constGas)
 }
 
+// emitCharge emits a static gas check and subtract for an explicit amount, the
+// same guard emitGasCheck bakes for an opcode's own gas. The fused paths use it
+// to charge the second and third opcode of a fused sequence at the points the
+// sequential ops would have charged.
+func (g *generator) emitCharge(gas uint64) {
+	g.p(`
+		if contract.Gas.RegularGas < %d {
+			return nil, ErrOutOfGas
+		}
+		contract.Gas.RegularGas -= %d
+	`, gas, gas)
+}
+
 // emitWork emits the stack/gas guards and the opcode body (the portion that runs
 // when the opcode is active for the current fork).
 func (g *generator) emitWork(code byte) {
@@ -604,7 +617,26 @@ func (g *generator) emitWork(code byte) {
 		`)
 	}
 
+	// Fused fast paths for the hottest dynamic opcode pairs (measured on the
+	// evm-bench workloads). Each runs a short sequence as one step with gas
+	// charged at the sequential points, stays off under verkle (the loop top
+	// charges code chunks per dispatched op there), and falls back to the plain
+	// body when the shape does not match, so every error path is the sequential
+	// one.
+	switch code {
+	case 0x60, 0x61: // PUSH1/PUSH2 + JUMP/JUMPI, PUSH1 + PUSH1
+		g.emitFusedPushJump(int(code) - 0x5f)
+	case 0x50: // POP + POP, POP + PUSH1/PUSH2
+		g.emitFusedPop()
+	case 0x15: // ISZERO + PUSH1/PUSH2 + JUMPI
+		g.emitFusedIszeroJumpi()
+	case 0x90, 0x91: // SWAP1/SWAP2 + POP
+		g.emitFusedSwapPop(int(code) - 0x8f)
+	}
+
 	switch {
+	case code == 0x56 || code == 0x57: // JUMP/JUMPI: hand written, see emitJumpCase
+		g.emitJumpCase(code == 0x57)
 	case code >= 0x62 && code <= 0x7f: // PUSH3-PUSH32: splice makePush(n, n)
 		n := int(code) - 0x5f
 		g.p("%s", g.inlineFactoryBody("makePush", n, n))
@@ -620,6 +652,255 @@ func (g *generator) emitWork(code byte) {
 	default:
 		g.p("%s", g.inlineBody(inlineHandler[code]))
 	}
+}
+
+// emitJumpCase hand writes the JUMP and JUMPI bodies instead of splicing
+// opJump/opJumpi. The flow matches the handlers except that a taken jump also
+// consumes the JUMPDEST it lands on: validJumpdest guarantees the destination
+// byte, so the landing dispatch and its one unit of gas fold into the jump.
+// Under verkle the landing stays a separate dispatch so the loop top can charge
+// its code chunk.
+func (g *generator) emitJumpCase(jumpi bool) {
+	jd := g.meta[0x5b].constGas // JUMPDEST
+	g.p(`
+		if evm.abort.Load() {
+			res, err = nil, errStopToken
+			break mainLoop
+		}
+	`)
+	if jumpi {
+		// pop2 is a must-expand helper, so its body is hand-inlined here rather
+		// than called: the generator's templates are not run through the AST
+		// inliner that expands tagged helpers in spliced handler bodies.
+		g.p(`
+			stack.inner.top -= 2
+			stack.size -= 2
+			pos, cond := &stack.inner.data[stack.inner.top+1], &stack.inner.data[stack.inner.top]
+			if !cond.IsZero() {
+		`)
+	} else {
+		g.p("pos := scope.Stack.pop1()\n")
+	}
+	g.p(`
+		if !scope.Contract.validJumpdest(pos) {
+			res, err = nil, ErrInvalidJump
+			break mainLoop
+		}
+		if isEIP4762 {
+			pc = pos.Uint64()
+			continue mainLoop
+		}
+	`)
+	g.emitCharge(jd)
+	g.p(`
+		pc = pos.Uint64() + 1
+		continue mainLoop
+	`)
+	if jumpi {
+		g.p(`
+			}
+			pc++
+			continue mainLoop
+		`)
+	}
+}
+
+// emitFusedPop emits the POP pair fast paths: POP POP drops two in one step, and
+// POP PUSH1/PUSH2 collapses to overwriting the top slot in place, since the pop
+// vacates exactly the slot the push would fill.
+func (g *generator) emitFusedPop() {
+	pop, push := g.meta[0x50].constGas, g.meta[0x60].constGas
+	g.p(`
+		if !isEIP4762 {
+			if cl := uint64(len(scope.Contract.Code)); pc+1 < cl {
+				switch scope.Contract.Code[pc+1] {
+				case 0x50: // POP
+					if stack.len() < 2 {
+						break
+					}
+	`)
+	g.emitCharge(pop)
+	g.p(`
+					scope.Stack.drop()
+					scope.Stack.drop()
+					pc += 2
+					continue mainLoop
+				case 0x60: // PUSH1
+					if pc+2 >= cl {
+						break
+					}
+	`)
+	g.emitCharge(push)
+	g.p(`
+					scope.Stack.peek().SetUint64(uint64(scope.Contract.Code[pc+2]))
+					pc += 3
+					continue mainLoop
+				case 0x61: // PUSH2
+					if pc+3 >= cl {
+						break
+					}
+	`)
+	g.emitCharge(push)
+	g.p(`
+					scope.Stack.peek().SetUint64(uint64(scope.Contract.Code[pc+2])<<8 | uint64(scope.Contract.Code[pc+3]))
+					pc += 4
+					continue mainLoop
+				}
+			}
+		}
+	`)
+}
+
+// emitFusedIszeroJumpi emits the Solidity branch-on-false shape ISZERO
+// PUSH1/PUSH2 dest JUMPI as one step. The inverted condition never lands on the
+// stack: the jump is taken exactly when the ISZERO operand is zero. The
+// stack.len() guard covers the push overflow case by falling back to the plain
+// ISZERO, which lets the sequential push raise the error.
+func (g *generator) emitFusedIszeroJumpi() {
+	push, jumpi, jd := g.meta[0x60].constGas, g.meta[0x57].constGas, g.meta[0x5b].constGas
+	g.p(`
+		if !isEIP4762 {
+			if cl := uint64(len(scope.Contract.Code)); pc+1 < cl && stack.len() <= 1023 {
+	`)
+	for _, n := range []int{2, 1} {
+		dest := "uint64(scope.Contract.Code[pc+2])"
+		if n == 2 {
+			dest = "uint64(scope.Contract.Code[pc+2])<<8 | uint64(scope.Contract.Code[pc+3])"
+		}
+		g.p("if scope.Contract.Code[pc+1] == %#x && pc+%d < cl && scope.Contract.Code[pc+%d] == 0x57 {\n", 0x5f+n, n+2, n+2)
+		g.emitCharge(push)
+		g.emitCharge(jumpi)
+		g.p(`
+			if evm.abort.Load() {
+				res, err = nil, errStopToken
+				break mainLoop
+			}
+			if cond := scope.Stack.pop1(); cond.IsZero() {
+				udest := %s
+				if udest >= cl || OpCode(scope.Contract.Code[udest]) != JUMPDEST || !scope.Contract.isCode(udest) {
+					res, err = nil, ErrInvalidJump
+					break mainLoop
+				}
+		`, dest)
+		g.emitCharge(jd)
+		g.p(`
+				pc = udest + 1
+				continue mainLoop
+			}
+			pc += %d
+			continue mainLoop
+			}
+		`, n+3)
+	}
+	g.p(`
+			}
+		}
+	`)
+}
+
+// emitFusedSwapPop emits SWAP1/SWAP2 followed by POP as a single copy: the
+// popped top lands in the slot the swap would have moved it to, and the value it
+// displaces is the one the pop discards.
+func (g *generator) emitFusedSwapPop(n int) {
+	pop := g.meta[0x50].constGas
+	g.p(`
+		if !isEIP4762 {
+			if pc+1 < uint64(len(scope.Contract.Code)) && scope.Contract.Code[pc+1] == 0x50 {
+	`)
+	g.emitCharge(pop)
+	g.p(`
+				v := scope.Stack.pop1()
+				*scope.Stack.back(%d) = *v
+				pc += 2
+				continue mainLoop
+			}
+		}
+	`, n-1)
+}
+
+// emitFusedPushJump emits the fused PUSH<n>+JUMP and PUSH<n>+JUMPI fast paths for
+// n = 1 or 2, plus the PUSH1+PUSH1 double push for n = 1. The guards run in the
+// same order as the sequential pair, so every gas and error trajectory stays
+// identical. The jump target is decoded from the immediate bytes and never lands
+// on the stack, and a taken jump consumes the JUMPDEST it lands on (see
+// emitJumpCase). Anything that cannot fuse falls out of the emitted block into
+// the plain push body, which IS the sequential execution, including the JUMPI
+// underflow case.
+func (g *generator) emitFusedPushJump(n int) {
+	jump, jumpi := g.meta[0x56], g.meta[0x57]
+	jd := g.meta[0x5b].constGas
+	dest := "uint64(scope.Contract.Code[pc+1])"
+	if n == 2 {
+		dest = "uint64(scope.Contract.Code[pc+1])<<8 | uint64(scope.Contract.Code[pc+2])"
+	}
+	g.p(`
+		if cl := uint64(len(scope.Contract.Code)); pc+%d < cl {
+			switch scope.Contract.Code[pc+%d] {
+			case 0x56: // JUMP
+	`, n+1, n+1)
+	g.emitCharge(jump.constGas)
+	g.p(`
+				if evm.abort.Load() {
+					res, err = nil, errStopToken
+					break mainLoop
+				}
+				udest := %s
+				if udest >= cl || OpCode(scope.Contract.Code[udest]) != JUMPDEST || !scope.Contract.isCode(udest) {
+					res, err = nil, ErrInvalidJump
+					break mainLoop
+				}
+	`, dest)
+	g.emitCharge(jd)
+	g.p(`
+				pc = udest + 1
+				continue mainLoop
+			case 0x57: // JUMPI
+				if stack.len() < %d {
+					break
+				}
+	`, jumpi.minStack-1)
+	g.emitCharge(jumpi.constGas)
+	g.p(`
+				if evm.abort.Load() {
+					res, err = nil, errStopToken
+					break mainLoop
+				}
+				if cond := scope.Stack.pop1(); !cond.IsZero() {
+					udest := %s
+					if udest >= cl || OpCode(scope.Contract.Code[udest]) != JUMPDEST || !scope.Contract.isCode(udest) {
+						res, err = nil, ErrInvalidJump
+						break mainLoop
+					}
+	`, dest)
+	g.emitCharge(jd)
+	g.p(`
+					pc = udest + 1
+					continue mainLoop
+				}
+				pc += %d
+				continue mainLoop
+	`, n+2)
+	if n == 1 {
+		g.p(`
+			case 0x60: // PUSH1
+				if pc+3 >= cl || stack.len() > 1022 {
+					break
+				}
+		`)
+		g.emitCharge(g.meta[0x60].constGas)
+		g.p(`
+				stack.inner.data[stack.inner.top].SetUint64(uint64(scope.Contract.Code[pc+1]))
+				stack.inner.data[stack.inner.top+1].SetUint64(uint64(scope.Contract.Code[pc+3]))
+				stack.inner.top += 2
+				stack.size += 2
+				pc += 4
+				continue mainLoop
+		`)
+	}
+	g.p(`
+			}
+		}
+	`)
 }
 
 func (g *generator) emitInlineCase(code byte) {
