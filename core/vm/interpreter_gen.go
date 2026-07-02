@@ -4,6 +4,7 @@ package vm
 
 import (
 	"fmt"
+	"math/bits"
 
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/core/tracing"
@@ -59,7 +60,11 @@ mainLoop:
 			stack.size--
 			x := &stack.inner.data[stack.inner.top]
 			y := &stack.inner.data[stack.inner.top-1]
-			y.Add(x, y)
+			var carry uint64
+			y[0], carry = bits.Add64(x[0], y[0], 0)
+			y[1], carry = bits.Add64(x[1], y[1], carry)
+			y[2], carry = bits.Add64(x[2], y[2], carry)
+			y[3], _ = bits.Add64(x[3], y[3], carry)
 			pc++
 			continue mainLoop
 
@@ -97,7 +102,11 @@ mainLoop:
 			stack.size--
 			x := &stack.inner.data[stack.inner.top]
 			y := &stack.inner.data[stack.inner.top-1]
-			y.Sub(x, y)
+			var carry uint64
+			y[0], carry = bits.Sub64(x[0], y[0], 0)
+			y[1], carry = bits.Sub64(x[1], y[1], carry)
+			y[2], carry = bits.Sub64(x[2], y[2], carry)
+			y[3], _ = bits.Sub64(x[3], y[3], carry)
 			pc++
 			continue mainLoop
 
@@ -251,10 +260,14 @@ mainLoop:
 			stack.size--
 			x := &stack.inner.data[stack.inner.top]
 			y := &stack.inner.data[stack.inner.top-1]
-			if x.Lt(y) {
-				y.SetOne()
+			_, carry := bits.Sub64(x[0], y[0], 0)
+			_, carry = bits.Sub64(x[1], y[1], carry)
+			_, carry = bits.Sub64(x[2], y[2], carry)
+			_, carry = bits.Sub64(x[3], y[3], carry)
+			if carry != 0 {
+				y[3], y[2], y[1], y[0] = 0, 0, 0, 1
 			} else {
-				y.Clear()
+				y[3], y[2], y[1], y[0] = 0, 0, 0, 0
 			}
 			pc++
 			continue mainLoop
@@ -274,10 +287,14 @@ mainLoop:
 			stack.size--
 			x := &stack.inner.data[stack.inner.top]
 			y := &stack.inner.data[stack.inner.top-1]
-			if x.Gt(y) {
-				y.SetOne()
+			_, carry := bits.Sub64(y[0], x[0], 0)
+			_, carry = bits.Sub64(y[1], x[1], carry)
+			_, carry = bits.Sub64(y[2], x[2], carry)
+			_, carry = bits.Sub64(y[3], x[3], carry)
+			if carry != 0 {
+				y[3], y[2], y[1], y[0] = 0, 0, 0, 1
 			} else {
-				y.Clear()
+				y[3], y[2], y[1], y[0] = 0, 0, 0, 0
 			}
 			pc++
 			continue mainLoop
@@ -343,10 +360,10 @@ mainLoop:
 			stack.size--
 			x := &stack.inner.data[stack.inner.top]
 			y := &stack.inner.data[stack.inner.top-1]
-			if x.Eq(y) {
-				y.SetOne()
+			if (x[0] == y[0]) && (x[1] == y[1]) && (x[2] == y[2]) && (x[3] == y[3]) {
+				y[3], y[2], y[1], y[0] = 0, 0, 0, 1
 			} else {
-				y.Clear()
+				y[3], y[2], y[1], y[0] = 0, 0, 0, 0
 			}
 			pc++
 			continue mainLoop
@@ -363,10 +380,10 @@ mainLoop:
 			contract.Gas.UsedRegularGas += 3
 
 			x := scope.Stack.peek()
-			if x.IsZero() {
-				x.SetOne()
+			if (x[0] | x[1] | x[2] | x[3]) == 0 {
+				x[3], x[2], x[1], x[0] = 0, 0, 0, 1
 			} else {
-				x.Clear()
+				x[3], x[2], x[1], x[0] = 0, 0, 0, 0
 			}
 			pc++
 			continue mainLoop
@@ -386,7 +403,10 @@ mainLoop:
 			stack.size--
 			x := &stack.inner.data[stack.inner.top]
 			y := &stack.inner.data[stack.inner.top-1]
-			y.And(x, y)
+			y[0] = x[0] & y[0]
+			y[1] = x[1] & y[1]
+			y[2] = x[2] & y[2]
+			y[3] = x[3] & y[3]
 			pc++
 			continue mainLoop
 
@@ -405,7 +425,10 @@ mainLoop:
 			stack.size--
 			x := &stack.inner.data[stack.inner.top]
 			y := &stack.inner.data[stack.inner.top-1]
-			y.Or(x, y)
+			y[0] = x[0] | y[0]
+			y[1] = x[1] | y[1]
+			y[2] = x[2] | y[2]
+			y[3] = x[3] | y[3]
 			pc++
 			continue mainLoop
 
@@ -424,7 +447,10 @@ mainLoop:
 			stack.size--
 			x := &stack.inner.data[stack.inner.top]
 			y := &stack.inner.data[stack.inner.top-1]
-			y.Xor(x, y)
+			y[0] = x[0] ^ y[0]
+			y[1] = x[1] ^ y[1]
+			y[2] = x[2] ^ y[2]
+			y[3] = x[3] ^ y[3]
 			pc++
 			continue mainLoop
 
@@ -440,7 +466,7 @@ mainLoop:
 			contract.Gas.UsedRegularGas += 3
 
 			x := scope.Stack.peek()
-			x.Not(x)
+			x[3], x[2], x[1], x[0] = ^x[3], ^x[2], ^x[1], ^x[0]
 			pc++
 			continue mainLoop
 
@@ -893,7 +919,7 @@ mainLoop:
 				stack.inner.top++
 				stack.size++
 				elem := &stack.inner.data[stack.inner.top-1]
-				elem.Clear()
+				elem[3], elem[2], elem[1], elem[0] = 0, 0, 0, 0
 				pc++
 				continue mainLoop
 

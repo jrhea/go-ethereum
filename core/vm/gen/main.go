@@ -47,6 +47,7 @@ import (
 	"go/printer"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -113,6 +114,7 @@ type generator struct {
 	opcodeHandlers map[string]*ast.FuncDecl
 	stackHelpers   map[string]*ast.FuncDecl
 	gasHelpers     map[string]*ast.FuncDecl
+	uint256Methods map[string]*ast.FuncDecl
 	specs          [256]opSpec
 	buf            *bytes.Buffer
 }
@@ -156,6 +158,40 @@ func parseHandlers(vmDir string) (fset *token.FileSet, opcodeHandlers, stackHelp
 		}
 	}
 	return fset, opcodeHandlers, stackHelpers, gasHelpers
+}
+
+// parseUint256Methods parses the uint256 package source and returns the small
+// arithmetic/bitwise (*Int) methods named in want, by name. They are spliced into
+// the dispatch the same way as stack helpers: the generated switch is past Go's
+// big-function inline budget, so these calls survive as real calls otherwise.
+func parseUint256Methods(vmDir string, want map[string]bool) map[string]*ast.FuncDecl {
+	cmd := exec.Command("go", "list", "-f", "{{.Dir}}", "github.com/holiman/uint256")
+	cmd.Dir = vmDir
+	out, err := cmd.Output()
+	if err != nil {
+		fatalf("locate uint256: %v", err)
+	}
+	path := filepath.Join(strings.TrimSpace(string(out)), "uint256.go")
+	f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		fatalf("parse %s: %v", path, err)
+	}
+	methods := map[string]*ast.FuncDecl{}
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		if methodReceiver(fn) == "Int" && want[fn.Name.Name] {
+			methods[fn.Name.Name] = fn
+		}
+	}
+	for name := range want {
+		if methods[name] == nil {
+			fatalf("uint256 method %q not found in %s", name, path)
+		}
+	}
+	return methods
 }
 
 // methodReceiver returns the receiver type name of a pointer-receiver method
@@ -394,6 +430,13 @@ func (g *generator) inlineStackHelpers(stmts []ast.Stmt, params map[string]int) 
 		if call, ok := g.matchStackHelper(stmt); ok {
 			// e.g. `x, y := scope.Stack.pop1Peek1()` becomes the body of pop1Peek1.
 			out.WriteString(g.inlineStackHelper(call, params))
+		} else if call := g.matchUint256Call(stmt); call != nil {
+			// e.g. `y.Add(x, y)` becomes the body of uint256's Add.
+			out.WriteString(g.inlineUint256Call(call))
+		} else if ifs := g.matchUint256If(stmt); ifs != nil {
+			// e.g. `if x.Lt(y) { y.SetOne() } else { y.Clear() }` inlines the
+			// comparison and both branches.
+			out.WriteString(g.inlineUint256If(ifs))
 		} else {
 			// A plain statement: print it verbatim, then fill in any makePush or
 			// makeDup factory params with this opcode's constants.
@@ -460,6 +503,125 @@ func (g *generator) inlineStackHelper(call stackCall, params map[string]int) str
 	return out.String()
 }
 
+// matchUint256Call reports whether stmt is a bare uint256 method call we splice
+// (e.g. `y.Add(x, y)`), returning the call. Only the arithmetic/bitwise ops in
+// uint256Methods qualify; comparisons and the big Mul/Div routines are left as calls.
+func (g *generator) matchUint256Call(stmt ast.Stmt) *ast.CallExpr {
+	es, ok := stmt.(*ast.ExprStmt)
+	if !ok {
+		return nil
+	}
+	call, ok := es.X.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || g.uint256Methods[sel.Sel.Name] == nil {
+		return nil
+	}
+	return call
+}
+
+// inlineUint256Call splices a uint256 method body in place of the call, mapping the
+// receiver and parameters to the call's receiver and arguments. The body is
+// straight-line assignments then `return z` (the receiver), which is dropped since
+// the handlers discard the result (the receiver is a stack slot mutated in place).
+func (g *generator) inlineUint256Call(call *ast.CallExpr) string {
+	sel := call.Fun.(*ast.SelectorExpr)
+	fn := g.uint256Methods[sel.Sel.Name]
+	names := paramNames(fn)
+	if len(names) != len(call.Args) {
+		fatalf("uint256 %q takes %d params, call passes %d", sel.Sel.Name, len(names), len(call.Args))
+	}
+	subst := map[string]string{recvName(fn): renderInlineExpr(sel.X, nil)}
+	for i, name := range names {
+		subst[name] = renderInlineExpr(call.Args[i], nil)
+	}
+	body := fn.Body.List
+	if n := len(body); n > 0 {
+		if _, ok := body[n-1].(*ast.ReturnStmt); ok {
+			body = body[:n-1]
+		}
+	}
+	var out strings.Builder
+	for _, stmt := range body {
+		out.WriteString(renderInlineStmt(stmt, subst) + "\n")
+	}
+	return out.String()
+}
+
+// matchUint256If reports whether stmt is an `if cmp { ... } else { ... }` whose
+// condition is a uint256 comparison we splice (Lt/Gt/Eq/IsZero), returning it.
+func (g *generator) matchUint256If(stmt ast.Stmt) *ast.IfStmt {
+	ifs, ok := stmt.(*ast.IfStmt)
+	if !ok {
+		return nil
+	}
+	call, ok := ifs.Cond.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || g.uint256Methods[sel.Sel.Name] == nil {
+		return nil
+	}
+	return ifs
+}
+
+// inlineUint256If splices a comparison-driven if: the condition method's body
+// becomes a prelude plus a plain boolean condition, and each branch's SetOne/Clear
+// calls are spliced in turn.
+func (g *generator) inlineUint256If(ifs *ast.IfStmt) string {
+	prelude, cond := g.inlineUint256Value(ifs.Cond.(*ast.CallExpr), nil)
+	var out strings.Builder
+	out.WriteString(prelude)
+	out.WriteString("if " + cond + " {\n")
+	out.WriteString(g.inlineStackHelpers(ifs.Body.List, nil))
+	out.WriteString("}")
+	if ifs.Else != nil {
+		out.WriteString(" else {\n")
+		out.WriteString(g.inlineStackHelpers(ifs.Else.(*ast.BlockStmt).List, nil))
+		out.WriteString("}")
+	}
+	out.WriteString("\n")
+	return out.String()
+}
+
+// inlineUint256Value inlines a comparison method used as a value: it returns the
+// method's leading statements (the prelude) and the boolean expression its trailing
+// return yields, both with receiver and parameters substituted. outer carries the
+// caller's substitution so a delegating comparison (Gt returns x.Lt(z)) inlines its
+// nested call too.
+func (g *generator) inlineUint256Value(call *ast.CallExpr, outer map[string]string) (prelude, value string) {
+	sel := call.Fun.(*ast.SelectorExpr)
+	fn := g.uint256Methods[sel.Sel.Name]
+	names := paramNames(fn)
+	if len(names) != len(call.Args) {
+		fatalf("uint256 %q takes %d params, call passes %d", sel.Sel.Name, len(names), len(call.Args))
+	}
+	subst := map[string]string{recvName(fn): renderInlineExpr(sel.X, outer)}
+	for i, name := range names {
+		subst[name] = renderInlineExpr(call.Args[i], outer)
+	}
+	body := fn.Body.List
+	ret, ok := body[len(body)-1].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		fatalf("uint256 %q is not a single-value comparison", sel.Sel.Name)
+	}
+	var pre strings.Builder
+	for _, stmt := range body[:len(body)-1] {
+		pre.WriteString(renderInlineStmt(stmt, subst) + "\n")
+	}
+	// A delegating comparison (e.g. Gt's `return x.Lt(z)`) inlines the nested call.
+	if nested, ok := ret.Results[0].(*ast.CallExpr); ok {
+		if s, isSel := nested.Fun.(*ast.SelectorExpr); isSel && g.uint256Methods[s.Sel.Name] != nil {
+			np, nv := g.inlineUint256Value(nested, subst)
+			return pre.String() + np, nv
+		}
+	}
+	return pre.String(), renderInlineExpr(ret.Results[0], subst)
+}
+
 // recvName returns a method's receiver name (e.g. "s").
 func recvName(fn *ast.FuncDecl) string {
 	if names := fn.Recv.List[0].Names; len(names) > 0 {
@@ -483,20 +645,23 @@ func paramNames(fn *ast.FuncDecl) []string {
 // statement shapes the helpers use are handled; any other is not inlinable.
 func renderInlineStmt(stmt ast.Stmt, subst map[string]string) string {
 	switch s := stmt.(type) {
+	case *ast.DeclStmt: // var carry uint64
+		spec := s.Decl.(*ast.GenDecl).Specs[0].(*ast.ValueSpec)
+		return "var " + spec.Names[0].Name + " " + renderInlineExpr(spec.Type, subst)
 	case *ast.IncDecStmt: // s.inner.top++
 		return renderInlineExpr(s.X, subst) + s.Tok.String()
-	case *ast.AssignStmt: // s.size -= 2, data[x] = data[y], or the swap tuple a, b = b, a
-		if len(s.Lhs) == len(s.Rhs) && len(s.Lhs) >= 1 {
-			lhs := make([]string, len(s.Lhs))
-			rhs := make([]string, len(s.Rhs))
-			for i := range s.Lhs {
-				lhs[i] = renderInlineExpr(s.Lhs[i], subst)
-				rhs[i] = renderInlineExpr(s.Rhs[i], subst)
-			}
-			return strings.Join(lhs, ", ") + " " + s.Tok.String() + " " + strings.Join(rhs, ", ")
+	case *ast.AssignStmt: // s.size -= 2, swap a, b = b, a, or z[0], carry = bits.Add64(...)
+		lhs := make([]string, len(s.Lhs))
+		rhs := make([]string, len(s.Rhs))
+		for i := range s.Lhs {
+			lhs[i] = renderInlineExpr(s.Lhs[i], subst)
 		}
+		for i := range s.Rhs {
+			rhs[i] = renderInlineExpr(s.Rhs[i], subst)
+		}
+		return strings.Join(lhs, ", ") + " " + s.Tok.String() + " " + strings.Join(rhs, ", ")
 	}
-	fatalf("inline: unsupported statement %T in stack helper", stmt)
+	fatalf("inline: unsupported statement %T", stmt)
 	return ""
 }
 
@@ -517,10 +682,18 @@ func renderInlineExpr(expr ast.Expr, subst map[string]string) string {
 		return renderInlineExpr(e.X, subst) + "[" + renderInlineExpr(e.Index, subst) + "]"
 	case *ast.BinaryExpr: // x op y
 		return renderInlineExpr(e.X, subst) + " " + e.Op.String() + " " + renderInlineExpr(e.Y, subst)
-	case *ast.UnaryExpr: // &x
+	case *ast.UnaryExpr: // &x, ^x
 		return e.Op.String() + renderInlineExpr(e.X, subst)
+	case *ast.ParenExpr: // (z[0] | z[1] | z[2] | z[3])
+		return "(" + renderInlineExpr(e.X, subst) + ")"
+	case *ast.CallExpr: // bits.Add64(x[0], y[0], carry)
+		args := make([]string, len(e.Args))
+		for i, a := range e.Args {
+			args[i] = renderInlineExpr(a, subst)
+		}
+		return renderInlineExpr(e.Fun, subst) + "(" + strings.Join(args, ", ") + ")"
 	}
-	fatalf("inline: unsupported expression %T in stack helper", expr)
+	fatalf("inline: unsupported expression %T", expr)
 	return ""
 }
 
@@ -846,6 +1019,7 @@ func (g *generator) createFile() {
 
 		import (
 			"fmt"
+			"math/bits"
 
 			"github.com/ethereum/go-ethereum/common/math"
 			"github.com/ethereum/go-ethereum/core/tracing"
@@ -931,7 +1105,11 @@ func main() {
 	vmDir := filepath.Dir(filepath.Dir(self)) // .../core/vm/gen -> .../core/vm
 
 	fset, opcodeHandlers, stackHelpers, gasHelpers := parseHandlers(vmDir)
-	g := &generator{fset: fset, opcodeHandlers: opcodeHandlers, stackHelpers: stackHelpers, gasHelpers: gasHelpers, buf: new(bytes.Buffer)}
+	uint256Methods := parseUint256Methods(vmDir, map[string]bool{
+		"Add": true, "Sub": true, "And": true, "Or": true, "Xor": true, "Not": true,
+		"Lt": true, "Gt": true, "Eq": true, "IsZero": true, "SetOne": true, "Clear": true,
+	})
+	g := &generator{fset: fset, opcodeHandlers: opcodeHandlers, stackHelpers: stackHelpers, gasHelpers: gasHelpers, uint256Methods: uint256Methods, buf: new(bytes.Buffer)}
 	g.deriveSpecs(vm.GenForks())
 	g.createFile()
 
