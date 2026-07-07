@@ -61,6 +61,21 @@ var inlineOps = func() map[byte]bool {
 	for code := 0x90; code <= 0x9f; code++ { // SWAP1-SWAP16
 		m[byte(code)] = true
 	}
+
+	// TEMPORARY (benchmark scratch, not for merge): the fork-stable, no-dynamic-gas
+	// opcodes that are inline-eligible but were left in the table because they are
+	// cold. Added here to measure the wall-clock effect of inlining them. To revert,
+	// delete this block.
+	for _, code := range []byte{
+		0x00,                                                 // STOP
+		0x30, 0x32, 0x33, 0x34, 0x35, 0x36, 0x38, 0x3a, 0x3d, // ADDRESS ORIGIN CALLER CALLVALUE CALLDATALOAD CALLDATASIZE CODESIZE GASPRICE RETURNDATASIZE
+		0x40, 0x41, 0x42, 0x43, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, // BLOCKHASH COINBASE TIMESTAMP NUMBER GASLIMIT CHAINID SELFBALANCE BASEFEE BLOBHASH BLOBBASEFEE SLOTNUM
+		0x5a, 0x5c, 0x5d, // GAS TLOAD TSTORE
+		0xe6, 0xe7, 0xe8, // DUPN SWAPN EXCHANGE
+		0xfe, // INVALID
+	} {
+		m[code] = true
+	}
 	return m
 }()
 
@@ -865,6 +880,7 @@ func (g *generator) createFile() {
 		import (
 			"fmt"
 
+			"github.com/ethereum/go-ethereum/common"
 			"github.com/ethereum/go-ethereum/common/math"
 			"github.com/ethereum/go-ethereum/core/tracing"
 		)

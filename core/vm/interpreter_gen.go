@@ -5,6 +5,7 @@ package vm
 import (
 	"fmt"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/core/tracing"
 )
@@ -44,6 +45,10 @@ mainLoop:
 
 		op := contract.GetOp(pc)
 		switch op {
+		case STOP:
+			res, err = nil, errStopToken
+			break mainLoop
+
 		case ADD:
 			if sLen := stack.len(); sLen < 2 {
 				return nil, &ErrStackUnderflow{stackLen: sLen, required: 2}
@@ -619,6 +624,371 @@ mainLoop:
 			}
 			pc++
 			continue mainLoop
+		case ADDRESS:
+			if sLen := stack.len(); sLen > 1023 {
+				return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+			}
+			if contract.Gas.RegularGas < 2 {
+				res, err = nil, ErrOutOfGas
+				break mainLoop
+			}
+			contract.Gas.RegularGas -= 2
+			contract.Gas.UsedRegularGas += 2
+
+			scope.Stack.get().SetBytes(scope.Contract.Address().Bytes())
+			pc++
+			continue mainLoop
+
+		case ORIGIN:
+			if sLen := stack.len(); sLen > 1023 {
+				return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+			}
+			if contract.Gas.RegularGas < 2 {
+				res, err = nil, ErrOutOfGas
+				break mainLoop
+			}
+			contract.Gas.RegularGas -= 2
+			contract.Gas.UsedRegularGas += 2
+
+			scope.Stack.get().SetBytes(evm.Origin.Bytes())
+			pc++
+			continue mainLoop
+
+		case CALLER:
+			if sLen := stack.len(); sLen > 1023 {
+				return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+			}
+			if contract.Gas.RegularGas < 2 {
+				res, err = nil, ErrOutOfGas
+				break mainLoop
+			}
+			contract.Gas.RegularGas -= 2
+			contract.Gas.UsedRegularGas += 2
+
+			scope.Stack.get().SetBytes(scope.Contract.Caller().Bytes())
+			pc++
+			continue mainLoop
+
+		case CALLVALUE:
+			if sLen := stack.len(); sLen > 1023 {
+				return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+			}
+			if contract.Gas.RegularGas < 2 {
+				res, err = nil, ErrOutOfGas
+				break mainLoop
+			}
+			contract.Gas.RegularGas -= 2
+			contract.Gas.UsedRegularGas += 2
+
+			scope.Stack.get().Set(scope.Contract.value)
+			pc++
+			continue mainLoop
+
+		case CALLDATALOAD:
+			if sLen := stack.len(); sLen < 1 {
+				return nil, &ErrStackUnderflow{stackLen: sLen, required: 1}
+			}
+			if contract.Gas.RegularGas < 3 {
+				res, err = nil, ErrOutOfGas
+				break mainLoop
+			}
+			contract.Gas.RegularGas -= 3
+			contract.Gas.UsedRegularGas += 3
+
+			x := scope.Stack.peek()
+			if offset, overflow := x.Uint64WithOverflow(); !overflow {
+				data := getData(scope.Contract.Input, offset, 32)
+				x.SetBytes(data)
+			} else {
+				x.Clear()
+			}
+			pc++
+			continue mainLoop
+
+		case CALLDATASIZE:
+			if sLen := stack.len(); sLen > 1023 {
+				return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+			}
+			if contract.Gas.RegularGas < 2 {
+				res, err = nil, ErrOutOfGas
+				break mainLoop
+			}
+			contract.Gas.RegularGas -= 2
+			contract.Gas.UsedRegularGas += 2
+
+			scope.Stack.get().SetUint64(uint64(len(scope.Contract.Input)))
+			pc++
+			continue mainLoop
+
+		case CODESIZE:
+			if sLen := stack.len(); sLen > 1023 {
+				return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+			}
+			if contract.Gas.RegularGas < 2 {
+				res, err = nil, ErrOutOfGas
+				break mainLoop
+			}
+			contract.Gas.RegularGas -= 2
+			contract.Gas.UsedRegularGas += 2
+
+			scope.Stack.get().SetUint64(uint64(len(scope.Contract.Code)))
+			pc++
+			continue mainLoop
+
+		case GASPRICE:
+			if sLen := stack.len(); sLen > 1023 {
+				return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+			}
+			if contract.Gas.RegularGas < 2 {
+				res, err = nil, ErrOutOfGas
+				break mainLoop
+			}
+			contract.Gas.RegularGas -= 2
+			contract.Gas.UsedRegularGas += 2
+
+			scope.Stack.get().Set(evm.GasPrice)
+			pc++
+			continue mainLoop
+
+		case RETURNDATASIZE:
+			if rules.IsByzantium {
+				if sLen := stack.len(); sLen > 1023 {
+					return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+				}
+				if contract.Gas.RegularGas < 2 {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				contract.Gas.RegularGas -= 2
+				contract.Gas.UsedRegularGas += 2
+
+				scope.Stack.get().SetUint64(uint64(len(evm.returnData)))
+				pc++
+				continue mainLoop
+
+			}
+			res, err = opUndefined(&pc, evm, scope)
+			break mainLoop
+		case BLOCKHASH:
+			if sLen := stack.len(); sLen < 1 {
+				return nil, &ErrStackUnderflow{stackLen: sLen, required: 1}
+			}
+			if contract.Gas.RegularGas < 20 {
+				res, err = nil, ErrOutOfGas
+				break mainLoop
+			}
+			contract.Gas.RegularGas -= 20
+			contract.Gas.UsedRegularGas += 20
+
+			num := scope.Stack.peek()
+			num64, overflow := num.Uint64WithOverflow()
+			if overflow {
+				num.Clear()
+				pc++
+				continue mainLoop
+			}
+			var upper, lower uint64
+			upper = evm.Context.BlockNumber.Uint64()
+			if upper < 257 {
+				lower = 0
+			} else {
+				lower = upper - 256
+			}
+			if num64 >= lower && num64 < upper {
+				res := evm.Context.GetHash(num64)
+				if witness := evm.StateDB.Witness(); witness != nil {
+					witness.AddBlockHash(num64)
+				}
+				if tracer := evm.Config.Tracer; tracer != nil && tracer.OnBlockHashRead != nil {
+					tracer.OnBlockHashRead(num64, res)
+				}
+				num.SetBytes(res[:])
+			} else {
+				num.Clear()
+			}
+			pc++
+			continue mainLoop
+
+		case COINBASE:
+			if sLen := stack.len(); sLen > 1023 {
+				return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+			}
+			if contract.Gas.RegularGas < 2 {
+				res, err = nil, ErrOutOfGas
+				break mainLoop
+			}
+			contract.Gas.RegularGas -= 2
+			contract.Gas.UsedRegularGas += 2
+
+			scope.Stack.get().SetBytes(evm.Context.Coinbase.Bytes())
+			pc++
+			continue mainLoop
+
+		case TIMESTAMP:
+			if sLen := stack.len(); sLen > 1023 {
+				return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+			}
+			if contract.Gas.RegularGas < 2 {
+				res, err = nil, ErrOutOfGas
+				break mainLoop
+			}
+			contract.Gas.RegularGas -= 2
+			contract.Gas.UsedRegularGas += 2
+
+			scope.Stack.get().SetUint64(evm.Context.Time)
+			pc++
+			continue mainLoop
+
+		case NUMBER:
+			if sLen := stack.len(); sLen > 1023 {
+				return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+			}
+			if contract.Gas.RegularGas < 2 {
+				res, err = nil, ErrOutOfGas
+				break mainLoop
+			}
+			contract.Gas.RegularGas -= 2
+			contract.Gas.UsedRegularGas += 2
+
+			scope.Stack.get().SetFromBig(evm.Context.BlockNumber)
+			pc++
+			continue mainLoop
+
+		case GASLIMIT:
+			if sLen := stack.len(); sLen > 1023 {
+				return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+			}
+			if contract.Gas.RegularGas < 2 {
+				res, err = nil, ErrOutOfGas
+				break mainLoop
+			}
+			contract.Gas.RegularGas -= 2
+			contract.Gas.UsedRegularGas += 2
+
+			scope.Stack.get().SetUint64(evm.Context.GasLimit)
+			pc++
+			continue mainLoop
+
+		case CHAINID:
+			if rules.IsIstanbul {
+				if sLen := stack.len(); sLen > 1023 {
+					return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+				}
+				if contract.Gas.RegularGas < 2 {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				contract.Gas.RegularGas -= 2
+				contract.Gas.UsedRegularGas += 2
+
+				scope.Stack.get().SetFromBig(evm.chainConfig.ChainID)
+				pc++
+				continue mainLoop
+
+			}
+			res, err = opUndefined(&pc, evm, scope)
+			break mainLoop
+		case SELFBALANCE:
+			if rules.IsIstanbul {
+				if sLen := stack.len(); sLen > 1023 {
+					return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+				}
+				if contract.Gas.RegularGas < 5 {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				contract.Gas.RegularGas -= 5
+				contract.Gas.UsedRegularGas += 5
+
+				scope.Stack.get().Set(evm.StateDB.GetBalance(scope.Contract.Address()))
+				pc++
+				continue mainLoop
+
+			}
+			res, err = opUndefined(&pc, evm, scope)
+			break mainLoop
+		case BASEFEE:
+			if rules.IsLondon {
+				if sLen := stack.len(); sLen > 1023 {
+					return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+				}
+				if contract.Gas.RegularGas < 2 {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				contract.Gas.RegularGas -= 2
+				contract.Gas.UsedRegularGas += 2
+
+				scope.Stack.get().SetFromBig(evm.Context.BaseFee)
+				pc++
+				continue mainLoop
+
+			}
+			res, err = opUndefined(&pc, evm, scope)
+			break mainLoop
+		case BLOBHASH:
+			if rules.IsCancun {
+				if sLen := stack.len(); sLen < 1 {
+					return nil, &ErrStackUnderflow{stackLen: sLen, required: 1}
+				}
+				if contract.Gas.RegularGas < 3 {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				contract.Gas.RegularGas -= 3
+				contract.Gas.UsedRegularGas += 3
+
+				index := scope.Stack.peek()
+				if index.LtUint64(uint64(len(evm.TxContext.BlobHashes))) {
+					blobHash := evm.TxContext.BlobHashes[index.Uint64()]
+					index.SetBytes32(blobHash[:])
+				} else {
+					index.Clear()
+				}
+				pc++
+				continue mainLoop
+
+			}
+			res, err = opUndefined(&pc, evm, scope)
+			break mainLoop
+		case BLOBBASEFEE:
+			if rules.IsCancun {
+				if sLen := stack.len(); sLen > 1023 {
+					return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+				}
+				if contract.Gas.RegularGas < 2 {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				contract.Gas.RegularGas -= 2
+				contract.Gas.UsedRegularGas += 2
+
+				scope.Stack.get().SetFromBig(evm.Context.BlobBaseFee)
+				pc++
+				continue mainLoop
+
+			}
+			res, err = opUndefined(&pc, evm, scope)
+			break mainLoop
+		case SLOTNUM:
+			if rules.IsAmsterdam {
+				if sLen := stack.len(); sLen > 1023 {
+					return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+				}
+				if contract.Gas.RegularGas < 2 {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				contract.Gas.RegularGas -= 2
+				contract.Gas.UsedRegularGas += 2
+
+				scope.Stack.get().SetUint64(evm.Context.SlotNum)
+				pc++
+				continue mainLoop
+
+			}
+			res, err = opUndefined(&pc, evm, scope)
+			break mainLoop
 		case POP:
 			if sLen := stack.len(); sLen < 1 {
 				return nil, &ErrStackUnderflow{stackLen: sLen, required: 1}
@@ -867,6 +1237,21 @@ mainLoop:
 			pc++
 			continue mainLoop
 
+		case GAS:
+			if sLen := stack.len(); sLen > 1023 {
+				return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+			}
+			if contract.Gas.RegularGas < 2 {
+				res, err = nil, ErrOutOfGas
+				break mainLoop
+			}
+			contract.Gas.RegularGas -= 2
+			contract.Gas.UsedRegularGas += 2
+
+			scope.Stack.get().SetUint64(scope.Contract.Gas.RegularGas)
+			pc++
+			continue mainLoop
+
 		case JUMPDEST:
 			if contract.Gas.RegularGas < 1 {
 				res, err = nil, ErrOutOfGas
@@ -878,6 +1263,55 @@ mainLoop:
 			pc++
 			continue mainLoop
 
+		case TLOAD:
+			if rules.IsCancun {
+				if sLen := stack.len(); sLen < 1 {
+					return nil, &ErrStackUnderflow{stackLen: sLen, required: 1}
+				}
+				if contract.Gas.RegularGas < 100 {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				contract.Gas.RegularGas -= 100
+				contract.Gas.UsedRegularGas += 100
+
+				loc := scope.Stack.peek()
+				hash := common.Hash(loc.Bytes32())
+				val := evm.StateDB.GetTransientState(scope.Contract.Address(), hash)
+				loc.SetBytes(val.Bytes())
+				pc++
+				continue mainLoop
+
+			}
+			res, err = opUndefined(&pc, evm, scope)
+			break mainLoop
+		case TSTORE:
+			if rules.IsCancun {
+				if sLen := stack.len(); sLen < 2 {
+					return nil, &ErrStackUnderflow{stackLen: sLen, required: 2}
+				}
+				if contract.Gas.RegularGas < 100 {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				contract.Gas.RegularGas -= 100
+				contract.Gas.UsedRegularGas += 100
+
+				if evm.readOnly {
+					res, err = nil, ErrWriteProtection
+					break mainLoop
+				}
+				stack.inner.top -= 2
+				stack.size -= 2
+				loc := &stack.inner.data[stack.inner.top+1]
+				val := &stack.inner.data[stack.inner.top]
+				evm.StateDB.SetTransientState(scope.Contract.Address(), loc.Bytes32(), val.Bytes32())
+				pc++
+				continue mainLoop
+
+			}
+			res, err = opUndefined(&pc, evm, scope)
+			break mainLoop
 		case PUSH0:
 			if rules.IsShanghai {
 				if sLen := stack.len(); sLen > 1023 {
@@ -2559,6 +2993,128 @@ mainLoop:
 			stack.inner.data[stack.bottom+stack.size-17], stack.inner.data[stack.bottom+stack.size-1] = stack.inner.data[stack.bottom+stack.size-1], stack.inner.data[stack.bottom+stack.size-17]
 			pc++
 			continue mainLoop
+
+		case DUPN:
+			if rules.IsAmsterdam {
+				if sLen := stack.len(); sLen < 1 {
+					return nil, &ErrStackUnderflow{stackLen: sLen, required: 1}
+				} else if sLen > 1023 {
+					return nil, &ErrStackOverflow{stackLen: sLen, limit: 1023}
+				}
+				if contract.Gas.RegularGas < 3 {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				contract.Gas.RegularGas -= 3
+				contract.Gas.UsedRegularGas += 3
+
+				code := scope.Contract.Code
+				i := pc + 1
+				// If the immediate byte is missing, treat as 0x00 (same convention as PUSHn).
+				var x byte
+				if i < uint64(len(code)) {
+					x = code[i]
+				}
+				if x > 90 && x < 128 {
+					operand := x
+					res, err = nil, &ErrInvalidOpCode{opcode: DUPN, operand: &operand}
+					break mainLoop
+				}
+				n := decodeSingle(x)
+				if scope.Stack.len() < n {
+					res, err = nil, &ErrStackUnderflow{stackLen: scope.Stack.len(), required: n}
+					break mainLoop
+				}
+				scope.Stack.push(scope.Stack.back(n - 1))
+				pc += 1
+				pc++
+				continue mainLoop
+
+			}
+			res, err = opUndefined(&pc, evm, scope)
+			break mainLoop
+		case SWAPN:
+			if rules.IsAmsterdam {
+				if sLen := stack.len(); sLen < 2 {
+					return nil, &ErrStackUnderflow{stackLen: sLen, required: 2}
+				}
+				if contract.Gas.RegularGas < 3 {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				contract.Gas.RegularGas -= 3
+				contract.Gas.UsedRegularGas += 3
+
+				code := scope.Contract.Code
+				i := pc + 1
+				// If the immediate byte is missing, treat as 0x00 (same convention as PUSHn).
+				var x byte
+				if i < uint64(len(code)) {
+					x = code[i]
+				}
+				if x > 90 && x < 128 {
+					operand := x
+					res, err = nil, &ErrInvalidOpCode{opcode: SWAPN, operand: &operand}
+					break mainLoop
+				}
+				n := decodeSingle(x)
+				if scope.Stack.len() < n+1 {
+					res, err = nil, &ErrStackUnderflow{stackLen: scope.Stack.len(), required: n + 1}
+					break mainLoop
+				}
+				top := scope.Stack.peek()
+				nth := scope.Stack.back(n)
+				*top, *nth = *nth, *top
+				pc += 1
+				pc++
+				continue mainLoop
+
+			}
+			res, err = opUndefined(&pc, evm, scope)
+			break mainLoop
+		case EXCHANGE:
+			if rules.IsAmsterdam {
+				if sLen := stack.len(); sLen < 2 {
+					return nil, &ErrStackUnderflow{stackLen: sLen, required: 2}
+				}
+				if contract.Gas.RegularGas < 3 {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				contract.Gas.RegularGas -= 3
+				contract.Gas.UsedRegularGas += 3
+
+				code := scope.Contract.Code
+				i := pc + 1
+				// If the immediate byte is missing, treat as 0x00 (same convention as PUSHn).
+				var x byte
+				if i < uint64(len(code)) {
+					x = code[i]
+				}
+				if x > 81 && x < 128 {
+					operand := x
+					res, err = nil, &ErrInvalidOpCode{opcode: EXCHANGE, operand: &operand}
+					break mainLoop
+				}
+				n, m := decodePair(x)
+				need := max(n, m) + 1
+				if scope.Stack.len() < need {
+					res, err = nil, &ErrStackUnderflow{stackLen: scope.Stack.len(), required: need}
+					break mainLoop
+				}
+				nth := scope.Stack.back(n)
+				mth := scope.Stack.back(m)
+				*nth, *mth = *mth, *nth
+				pc += 1
+				pc++
+				continue mainLoop
+
+			}
+			res, err = opUndefined(&pc, evm, scope)
+			break mainLoop
+		case INVALID:
+			res, err = nil, &ErrInvalidOpCode{opcode: OpCode(scope.Contract.Code[pc])}
+			break mainLoop
 
 		default:
 			operation := table[op]
