@@ -734,3 +734,66 @@ func BenchmarkEffectiveGasTipCmp(b *testing.B) {
 		}
 	})
 }
+
+// TestTransactionU256Accessors checks that the uint256 value accessors return the
+// same values as their big.Int counterparts across every transaction type.
+func TestTransactionU256Accessors(t *testing.T) {
+	blobHash := common.HexToHash("0x01a915e4d060149eb4365960e6a7a45f334393093061116b197e3240065ff2d8")
+	to := common.HexToAddress("0x000000000000000000000000000000000000dead")
+	tests := []struct {
+		name string
+		tx   TxData
+		blob bool
+	}{
+		{
+			name: "legacy",
+			tx:   &LegacyTx{Nonce: 1, GasPrice: big.NewInt(3000000000), Gas: 21000, To: &to, Value: big.NewInt(7)},
+		},
+		{
+			name: "access-list",
+			tx:   &AccessListTx{ChainID: big.NewInt(1), Nonce: 1, GasPrice: big.NewInt(3000000000), Gas: 21000, To: &to, Value: big.NewInt(7)},
+		},
+		{
+			name: "dynamic-fee",
+			tx:   &DynamicFeeTx{ChainID: big.NewInt(1), Nonce: 1, GasTipCap: big.NewInt(2000000000), GasFeeCap: big.NewInt(3000000000), Gas: 21000, To: &to, Value: big.NewInt(7)},
+		},
+		{
+			name: "blob",
+			tx:   &BlobTx{ChainID: uint256.NewInt(1), Nonce: 1, GasTipCap: uint256.NewInt(2000000000), GasFeeCap: uint256.NewInt(3000000000), BlobFeeCap: uint256.NewInt(10), BlobHashes: []common.Hash{blobHash}, Gas: 21000, To: to, Value: uint256.NewInt(7)},
+			blob: true,
+		},
+		{
+			name: "set-code",
+			tx:   &SetCodeTx{ChainID: uint256.NewInt(1), Nonce: 1, GasTipCap: uint256.NewInt(2000000000), GasFeeCap: uint256.NewInt(3000000000), Gas: 21000, To: to, Value: uint256.NewInt(7)},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx := NewTx(tt.tx)
+			check := func(field string, got *uint256.Int, overflow bool, want *big.Int) {
+				t.Helper()
+				if overflow {
+					t.Fatalf("%s: unexpected overflow", field)
+				}
+				if want, _ := uint256.FromBig(want); got.Cmp(want) != 0 {
+					t.Fatalf("%s: got %v, want %v", field, got, want)
+				}
+			}
+			gasPrice, of := tx.GasPriceU256()
+			check("GasPriceU256", gasPrice, of, tx.GasPrice())
+			gasTipCap, of := tx.GasTipCapU256()
+			check("GasTipCapU256", gasTipCap, of, tx.GasTipCap())
+			gasFeeCap, of := tx.GasFeeCapU256()
+			check("GasFeeCapU256", gasFeeCap, of, tx.GasFeeCap())
+			value, of := tx.ValueU256()
+			check("ValueU256", value, of, tx.Value())
+
+			blobGasFeeCap := tx.BlobGasFeeCapU256()
+			if tt.blob {
+				check("BlobGasFeeCapU256", blobGasFeeCap, false, tx.BlobGasFeeCap())
+			} else if blobGasFeeCap != nil {
+				t.Fatalf("BlobGasFeeCapU256: got %v, want nil for non-blob tx", blobGasFeeCap)
+			}
+		})
+	}
+}

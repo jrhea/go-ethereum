@@ -302,30 +302,24 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 	if err != nil {
 		return nil, err
 	}
-	gasPrice, overflow := uint256.FromBig(tx.GasPrice())
+	gasPrice, overflow := tx.GasPriceU256()
 	if overflow {
 		return nil, fmt.Errorf("%w: address %v, maxFeePerGas bit length: %d", ErrFeeCapVeryHigh,
 			from.Hex(), tx.GasPrice().BitLen())
 	}
-	txGasFeeCap := tx.GasFeeCap()
-	gasFeeCap, overflow := uint256.FromBig(txGasFeeCap)
+	gasFeeCap, overflow := tx.GasFeeCapU256()
 	if overflow {
 		return nil, fmt.Errorf("%w: address %v, maxFeePerGas bit length: %d", ErrFeeCapVeryHigh,
 			from.Hex(), tx.GasFeeCap().BitLen())
 	}
-	txGasTipCap := tx.GasTipCap()
-	gasTipCap, overflow := uint256.FromBig(txGasTipCap)
+	gasTipCap, overflow := tx.GasTipCapU256()
 	if overflow {
 		return nil, fmt.Errorf("%w: address %v, maxPriorityFeePerGas bit length: %d", ErrTipVeryHigh,
 			from.Hex(), tx.GasTipCap().BitLen())
 	}
-	value, overflow := uint256.FromBig(tx.Value())
+	value, overflow := tx.ValueU256()
 	if overflow {
 		return nil, fmt.Errorf("value exceeds 256 bits: address %v", from.Hex())
-	}
-	blobGasFeeCap, overflow := uint256.FromBig(tx.BlobGasFeeCap())
-	if overflow {
-		return nil, fmt.Errorf("blobGasFeeCap exceeds 256 bits: address %v", from.Hex())
 	}
 
 	msg := &Message{
@@ -343,17 +337,24 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 		SkipNonceChecks:       false,
 		SkipTransactionChecks: false,
 		BlobHashes:            tx.BlobHashes(),
-		BlobGasFeeCap:         blobGasFeeCap,
+		BlobGasFeeCap:         tx.BlobGasFeeCapU256(),
 	}
 	// If baseFee provided, set gasPrice to effectiveGasPrice.
 	if baseFee != nil {
-		effectiveGasPrice := new(big.Int).Add(baseFee, txGasTipCap)
-		if effectiveGasPrice.Cmp(txGasFeeCap) > 0 {
-			effectiveGasPrice = txGasFeeCap
+		// effectiveGasPrice = min(gasFeeCap, baseFee+gasTipCap), computed in the
+		// uint256 domain to avoid throwaway big.Int allocations. baseFeeU256 does
+		// not escape, so it stays on the stack.
+		var baseFeeU256 uint256.Int
+		baseFeeOverflow := baseFeeU256.SetFromBig(baseFee)
+		effectiveGasPrice := new(uint256.Int)
+		_, sumOverflow := effectiveGasPrice.AddOverflow(&baseFeeU256, gasTipCap)
+		if baseFeeOverflow || sumOverflow || effectiveGasPrice.Cmp(gasFeeCap) > 0 {
+			// The base fee overflows, the sum overflows, or the sum exceeds the fee
+			// cap. In all of these cases the effective gas price is capped by
+			// gasFeeCap.
+			effectiveGasPrice.Set(gasFeeCap)
 		}
-		// EffectiveGasPrice is already capped by txGasFeeCap, therefore
-		// the overflow check is not required.
-		msg.GasPrice = uint256.MustFromBig(effectiveGasPrice)
+		msg.GasPrice = effectiveGasPrice
 	}
 	return msg, nil
 }

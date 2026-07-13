@@ -306,6 +306,31 @@ func (tx *Transaction) GasFeeCap() *big.Int { return new(big.Int).Set(tx.inner.g
 // Value returns the ether amount of the transaction.
 func (tx *Transaction) Value() *big.Int { return new(big.Int).Set(tx.inner.value()) }
 
+// GasPriceU256 returns the gas price of the transaction as a uint256. The second
+// return value is true if the value overflows 256 bits. Unlike GasPrice, this
+// reads the inner value directly and does not allocate a big.Int copy.
+func (tx *Transaction) GasPriceU256() (*uint256.Int, bool) {
+	return uint256.FromBig(tx.inner.gasPrice())
+}
+
+// GasTipCapU256 returns the gasTipCap per gas of the transaction as a uint256.
+// The second return value is true if the value overflows 256 bits.
+func (tx *Transaction) GasTipCapU256() (*uint256.Int, bool) {
+	return uint256.FromBig(tx.inner.gasTipCap())
+}
+
+// GasFeeCapU256 returns the fee cap per gas of the transaction as a uint256. The
+// second return value is true if the value overflows 256 bits.
+func (tx *Transaction) GasFeeCapU256() (*uint256.Int, bool) {
+	return uint256.FromBig(tx.inner.gasFeeCap())
+}
+
+// ValueU256 returns the ether amount of the transaction as a uint256. The second
+// return value is true if the value overflows 256 bits.
+func (tx *Transaction) ValueU256() (*uint256.Int, bool) {
+	return uint256.FromBig(tx.inner.value())
+}
+
 // Nonce returns the sender account nonce of the transaction.
 func (tx *Transaction) Nonce() uint64 { return tx.inner.nonce() }
 
@@ -456,6 +481,16 @@ func (tx *Transaction) BlobGas() uint64 {
 func (tx *Transaction) BlobGasFeeCap() *big.Int {
 	if blobtx, ok := tx.inner.(*BlobTx); ok {
 		return blobtx.BlobFeeCap.ToBig()
+	}
+	return nil
+}
+
+// BlobGasFeeCapU256 returns the blob gas fee cap per blob gas of the transaction
+// as a uint256 for blob transactions, nil otherwise. The blob fee cap is stored
+// as a uint256, so this returns a copy without a big.Int round-trip.
+func (tx *Transaction) BlobGasFeeCapU256() *uint256.Int {
+	if blobtx, ok := tx.inner.(*BlobTx); ok {
+		return new(uint256.Int).Set(blobtx.BlobFeeCap)
 	}
 	return nil
 }

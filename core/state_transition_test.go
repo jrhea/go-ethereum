@@ -18,11 +18,13 @@ package core
 
 import (
 	"bytes"
+	"math/big"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
 )
@@ -369,6 +371,127 @@ func TestIntrinsicGas(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Fatalf("gas mismatch: got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestTransactionToMessageEffectiveGasPrice verifies that the uint256-domain
+// effective gas price computed by TransactionToMessage matches the original
+// big.Int algorithm, including the boundary cases around the fee cap and the
+// case where baseFee+gasTipCap overflows 256 bits.
+func TestTransactionToMessageEffectiveGasPrice(t *testing.T) {
+	signer := types.LatestSignerForChainID(big.NewInt(1))
+	key, _ := crypto.GenerateKey()
+	to := common.HexToAddress("0x000000000000000000000000000000000000dead")
+
+	// maxU256 is 2^256-1, the largest value representable as a uint256.
+	maxU256 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+
+	// wantGasPrice mirrors the original big.Int algorithm and acts as the oracle.
+	wantGasPrice := func(tx *types.Transaction, baseFee *big.Int) *big.Int {
+		if baseFee == nil {
+			return tx.GasPrice()
+		}
+		egp := new(big.Int).Add(baseFee, tx.GasTipCap())
+		if egp.Cmp(tx.GasFeeCap()) > 0 {
+			egp = tx.GasFeeCap()
+		}
+		return egp
+	}
+
+	tests := []struct {
+		name    string
+		txdata  types.TxData
+		baseFee *big.Int
+	}{
+		{
+			name:    "dynamic/below-cap",
+			txdata:  &types.DynamicFeeTx{ChainID: big.NewInt(1), GasTipCap: big.NewInt(2e9), GasFeeCap: big.NewInt(30e9), Gas: 21000, To: &to, Value: big.NewInt(7)},
+			baseFee: big.NewInt(1e9), // baseFee+tip = 3 gwei < 30 gwei cap
+		},
+		{
+			name:    "dynamic/capped-by-feecap",
+			txdata:  &types.DynamicFeeTx{ChainID: big.NewInt(1), GasTipCap: big.NewInt(2e9), GasFeeCap: big.NewInt(3e9), Gas: 21000, To: &to, Value: big.NewInt(7)},
+			baseFee: big.NewInt(10e9), // baseFee+tip = 12 gwei > 3 gwei cap
+		},
+		{
+			name:    "dynamic/exactly-at-cap",
+			txdata:  &types.DynamicFeeTx{ChainID: big.NewInt(1), GasTipCap: big.NewInt(2e9), GasFeeCap: big.NewInt(3e9), Gas: 21000, To: &to, Value: big.NewInt(7)},
+			baseFee: big.NewInt(1e9), // baseFee+tip = 3 gwei == cap
+		},
+		{
+			name:    "dynamic/no-basefee",
+			txdata:  &types.DynamicFeeTx{ChainID: big.NewInt(1), GasTipCap: big.NewInt(2e9), GasFeeCap: big.NewInt(3e9), Gas: 21000, To: &to, Value: big.NewInt(7)},
+			baseFee: nil,
+		},
+		{
+			name:    "dynamic/sum-overflows-256-bits",
+			txdata:  &types.DynamicFeeTx{ChainID: big.NewInt(1), GasTipCap: maxU256, GasFeeCap: big.NewInt(3e9), Gas: 21000, To: &to, Value: big.NewInt(7)},
+			baseFee: big.NewInt(1e9), // baseFee+tip wraps in uint256; must still cap to feecap
+		},
+		{
+			name:    "legacy/with-basefee",
+			txdata:  &types.LegacyTx{Nonce: 1, GasPrice: big.NewInt(5e9), Gas: 21000, To: &to, Value: big.NewInt(7)},
+			baseFee: big.NewInt(1e9),
+		},
+		{
+			name:    "legacy/no-basefee",
+			txdata:  &types.LegacyTx{Nonce: 1, GasPrice: big.NewInt(5e9), Gas: 21000, To: &to, Value: big.NewInt(7)},
+			baseFee: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx, err := types.SignNewTx(key, signer, tt.txdata)
+			if err != nil {
+				t.Fatalf("sign tx: %v", err)
+			}
+			msg, err := TransactionToMessage(tx, signer, tt.baseFee)
+			if err != nil {
+				t.Fatalf("TransactionToMessage: %v", err)
+			}
+			want := wantGasPrice(tx, tt.baseFee)
+			if msg.GasPrice.ToBig().Cmp(want) != 0 {
+				t.Fatalf("effective gas price: got %v, want %v", msg.GasPrice, want)
+			}
+			// The effective gas price must be an independent object, never an alias
+			// of the fee cap, even when it is capped to the fee cap value.
+			if tt.baseFee != nil && msg.GasPrice == msg.GasFeeCap {
+				t.Fatalf("effective gas price aliases the fee cap object")
+			}
+		})
+	}
+}
+
+func BenchmarkTransactionToMessage(b *testing.B) {
+	signer := types.LatestSignerForChainID(big.NewInt(1))
+	key, _ := crypto.GenerateKey()
+	to := common.HexToAddress("0x000000000000000000000000000000000000dead")
+	baseFee := big.NewInt(1000000000) // 1 gwei
+
+	sign := func(txdata types.TxData) *types.Transaction {
+		tx, err := types.SignNewTx(key, signer, txdata)
+		if err != nil {
+			b.Fatal(err)
+		}
+		return tx
+	}
+	benches := []struct {
+		name string
+		tx   *types.Transaction
+	}{
+		{"dynamic-fee", sign(&types.DynamicFeeTx{ChainID: big.NewInt(1), GasTipCap: big.NewInt(2e9), GasFeeCap: big.NewInt(3e9), Gas: 21000, To: &to, Value: big.NewInt(7)})},
+		{"legacy", sign(&types.LegacyTx{GasPrice: big.NewInt(3e9), Gas: 21000, To: &to, Value: big.NewInt(7)})},
+		{"blob", sign(&types.BlobTx{ChainID: uint256.NewInt(1), GasTipCap: uint256.NewInt(2e9), GasFeeCap: uint256.NewInt(3e9), BlobFeeCap: uint256.NewInt(10), BlobHashes: []common.Hash{{}}, Gas: 21000, To: to, Value: uint256.NewInt(7)})},
+	}
+	for _, bb := range benches {
+		b.Run(bb.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				if _, err := TransactionToMessage(bb.tx, signer, baseFee); err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 	}
