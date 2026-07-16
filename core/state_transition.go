@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/core/vm/gevmbridge"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
 	"github.com/ethereum/go-ethereum/params"
@@ -371,7 +372,57 @@ func ApplyMessage(evm *vm.EVM, msg *Message, gp *GasPool) (*ExecutionResult, err
 		gp = NewGasPool(msg.GasLimit)
 	}
 	evm.SetTxContext(NewEVMTxContext(msg))
+	if gevmbridge.Enabled {
+		return applyMessageGevm(evm, msg, gp)
+	}
 	return newStateTransition(evm, msg, gp).execute()
+}
+
+// applyMessageGevm executes msg through the gevm backend instead of geth's
+// StateTransition. gevm runs the entire transaction (nonce, gas purchase,
+// execution, refund, coinbase reward) internally, and its resulting state is
+// mirrored into evm.StateDB by the bridge. The caller (ApplyTransactionWithEVM)
+// remains responsible for Finalise and receipt construction.
+//
+// Block gas is accounted the legacy way; the 2D-gas (EIP-8037) split is not
+// reproduced, so this path is for execution/benchmarking rather than consensus
+// validation. See the core/vm/gevmbridge package docs.
+func applyMessageGevm(evm *vm.EVM, msg *Message, gp *GasPool) (*ExecutionResult, error) {
+	// Reserve the transaction's gas from the block pool up front.
+	if err := gp.CheckGasLegacy(msg.GasLimit); err != nil {
+		return nil, err
+	}
+	res := gevmbridge.RunTx(evm.StateDB, evm.Context, evm.ChainConfig(), &gevmbridge.Msg{
+		From:          msg.From,
+		To:            msg.To,
+		Nonce:         msg.Nonce,
+		Value:         msg.Value,
+		GasLimit:      msg.GasLimit,
+		GasPrice:      msg.GasPrice,
+		GasFeeCap:     msg.GasFeeCap,
+		GasTipCap:     msg.GasTipCap,
+		Data:          msg.Data,
+		AccessList:    msg.AccessList,
+		BlobHashes:    msg.BlobHashes,
+		BlobGasFeeCap: msg.BlobGasFeeCap,
+		SetCodeAuths:  msg.SetCodeAuthorizations,
+	}, false)
+	if res.Invalid {
+		// A validation failure makes the transaction (and thus the block)
+		// invalid; surface it as an error like the native path does.
+		return nil, res.Err
+	}
+	// Return the unused gas to the pool and record the amount consumed.
+	gasLeft := msg.GasLimit - res.GasUsed
+	if err := gp.ChargeGasLegacy(gasLeft, res.GasUsed); err != nil {
+		return nil, err
+	}
+	return &ExecutionResult{
+		UsedGas:    res.GasUsed,
+		MaxUsedGas: res.GasUsed,
+		Err:        res.Err,
+		ReturnData: res.ReturnData,
+	}, nil
 }
 
 // stateTransition represents a state transition.

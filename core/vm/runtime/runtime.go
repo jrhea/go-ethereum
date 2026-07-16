@@ -25,6 +25,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/core/vm/gevmbridge"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
@@ -114,6 +115,29 @@ func setDefaults(cfg *Config) {
 	}
 }
 
+// gevmMsg builds a bridge message from a runtime config. The runtime paths run
+// fee-less (see gevmbridge.RunTx noFees), so gas price fields are omitted; only
+// caller, target, nonce, value, gas and calldata matter.
+func gevmMsg(cfg *Config, to *common.Address, input []byte) *gevmbridge.Msg {
+	return &gevmbridge.Msg{
+		From:     cfg.Origin,
+		To:       to,
+		Nonce:    cfg.State.GetNonce(cfg.Origin),
+		Value:    uint256.MustFromBig(cfg.Value),
+		GasLimit: cfg.GasLimit,
+		Data:     input,
+	}
+}
+
+// gevmLeftGas converts gevm's total gas used into the "leftover gas" figure the
+// runtime call/create signatures return.
+func gevmLeftGas(cfg *Config, used uint64) uint64 {
+	if used >= cfg.GasLimit {
+		return 0
+	}
+	return cfg.GasLimit - used
+}
+
 // Execute executes the code using the input as call data during the execution.
 // It returns the EVM's return value, the new state and an error if it failed.
 //
@@ -148,15 +172,26 @@ func Execute(code, input []byte, cfg *Config) ([]byte, *state.StateDB, error) {
 		limit = min(cfg.GasLimit, params.MaxTxGas)
 	}
 	// Call the code with the given configuration.
-	ret, result, err := vmenv.Call(
-		cfg.Origin,
-		common.BytesToAddress([]byte("contract")),
-		input,
-		vm.NewGasBudget(limit, cfg.GasLimit-limit),
-		uint256.MustFromBig(cfg.Value),
+	var (
+		ret     []byte
+		err     error
+		gasUsed uint64
 	)
+	if gevmbridge.Enabled {
+		res := gevmbridge.RunTx(cfg.State, vmenv.Context, cfg.ChainConfig, gevmMsg(cfg, &address, input), true)
+		ret, err, gasUsed = res.ReturnData, res.Err, res.GasUsed
+	} else {
+		r, result, e := vmenv.Call(
+			cfg.Origin,
+			address,
+			input,
+			vm.NewGasBudget(limit, cfg.GasLimit-limit),
+			uint256.MustFromBig(cfg.Value),
+		)
+		ret, err, gasUsed = r, e, cfg.GasLimit-result.ExecutionGas
+	}
 	if cfg.EVMConfig.Tracer != nil && cfg.EVMConfig.Tracer.OnTxEnd != nil {
-		cfg.EVMConfig.Tracer.OnTxEnd(&types.Receipt{GasUsed: cfg.GasLimit - result.ExecutionGas}, err)
+		cfg.EVMConfig.Tracer.OnTxEnd(&types.Receipt{GasUsed: gasUsed}, err)
 	}
 	return ret, cfg.State, err
 }
@@ -187,6 +222,17 @@ func Create(input []byte, cfg *Config) ([]byte, common.Address, uint64, error) {
 		limit = min(cfg.GasLimit, params.MaxTxGas)
 	}
 	// Call the code with the given configuration.
+	if gevmbridge.Enabled {
+		res := gevmbridge.RunTx(cfg.State, vmenv.Context, cfg.ChainConfig, gevmMsg(cfg, nil, input), true)
+		if cfg.EVMConfig.Tracer != nil && cfg.EVMConfig.Tracer.OnTxEnd != nil {
+			cfg.EVMConfig.Tracer.OnTxEnd(&types.Receipt{GasUsed: res.GasUsed}, res.Err)
+		}
+		var addr common.Address
+		if res.CreatedAddr != nil {
+			addr = *res.CreatedAddr
+		}
+		return res.ReturnData, addr, gevmLeftGas(cfg, res.GasUsed), res.Err
+	}
 	code, address, result, err := vmenv.Create(
 		cfg.Origin,
 		input,
@@ -225,6 +271,13 @@ func Call(address common.Address, input []byte, cfg *Config) ([]byte, uint64, er
 		limit = min(cfg.GasLimit, params.MaxTxGas)
 	}
 	// Call the code with the given configuration.
+	if gevmbridge.Enabled {
+		res := gevmbridge.RunTx(statedb, vmenv.Context, cfg.ChainConfig, gevmMsg(cfg, &address, input), true)
+		if cfg.EVMConfig.Tracer != nil && cfg.EVMConfig.Tracer.OnTxEnd != nil {
+			cfg.EVMConfig.Tracer.OnTxEnd(&types.Receipt{GasUsed: res.GasUsed}, res.Err)
+		}
+		return res.ReturnData, gevmLeftGas(cfg, res.GasUsed), res.Err
+	}
 	ret, result, err := vmenv.Call(
 		cfg.Origin,
 		address,
