@@ -1,0 +1,285 @@
+package state
+
+import (
+	"github.com/holiman/uint256"
+
+	"github.com/Giulio2002/gevm/spec"
+	"github.com/Giulio2002/gevm/types"
+)
+
+// AccountStatus is a bitflag tracking account state.
+type AccountStatus uint16
+
+const (
+	AccountStatusCreated           AccountStatus = 0b00000001
+	AccountStatusCreatedLocal      AccountStatus = 0b10000000
+	AccountStatusSelfDestructed    AccountStatus = 0b00000010
+	AccountStatusSelfDestructLocal AccountStatus = 0b01000000
+	AccountStatusTouched           AccountStatus = 0b00000100
+	AccountStatusLoadedAsNotExist  AccountStatus = 0b00001000
+	AccountStatusCold              AccountStatus = 0b00010000
+	AccountStatusStorageCleared    AccountStatus = 0b00100000
+	AccountStatusPreserveEmpty     AccountStatus = 0b1_00000000
+)
+
+// AccountInfo holds balance, nonce, code hash, and optional code.
+type AccountInfo struct {
+	Balance     uint256.Int
+	Nonce       uint64
+	Root        types.B256
+	Incarnation uint64
+	CodeHash    types.B256
+	Code        types.Bytes // nil means code not loaded yet
+}
+
+// DefaultAccountInfo returns an AccountInfo with default values (KECCAK_EMPTY code hash).
+func DefaultAccountInfo() AccountInfo {
+	return AccountInfo{
+		CodeHash: types.KeccakEmpty,
+	}
+}
+
+// IsEmpty returns true if balance is zero, nonce is zero, and code hash is empty/zero.
+func (info *AccountInfo) IsEmpty() bool {
+	codeEmpty := info.CodeHash == types.KeccakEmpty || info.CodeHash.IsZero()
+	return codeEmpty && info.Balance == (uint256.Int{}) && info.Nonce == 0
+}
+
+// IsEmptyCodeHash returns true if the code hash is KECCAK_EMPTY.
+func (info *AccountInfo) IsEmptyCodeHash() bool {
+	return info.CodeHash == types.KeccakEmpty
+}
+
+// HasNoCodeAndNonce returns true if nonce is 0 and code hash is KECCAK_EMPTY.
+func (info *AccountInfo) HasNoCodeAndNonce() bool {
+	return info.IsEmptyCodeHash() && info.Nonce == 0
+}
+
+// Clone returns a deep copy of the AccountInfo.
+func (info *AccountInfo) Clone() AccountInfo {
+	clone := *info
+	if info.Code != nil {
+		clone.Code = make(types.Bytes, len(info.Code))
+		copy(clone.Code, info.Code)
+	}
+	return clone
+}
+
+// Account is the main account type stored inside the journal.
+type Account struct {
+	Info              AccountInfo
+	OriginalInfo      AccountInfo
+	BlockOriginalInfo AccountInfo
+	TransactionID     int
+	Storage           EvmStorage
+	Status            AccountStatus
+}
+
+// DefaultAccount returns a zero-value Account with empty status.
+func DefaultAccount() *Account {
+	return &Account{
+		Info:    DefaultAccountInfo(),
+		Storage: make(EvmStorage),
+	}
+}
+
+// NewAccountFromInfo creates an Account from AccountInfo.
+// Storage is nil initially and lazily allocated on first write (SLoad/SStore).
+func NewAccountFromInfo(info AccountInfo) *Account {
+	return &Account{
+		Info:              info,
+		OriginalInfo:      info.Clone(),
+		BlockOriginalInfo: info.Clone(),
+	}
+}
+
+// NewAccountNotExisting creates an account marked as not existing.
+// Storage is nil initially; most "not existing" accounts (precompiles) never need storage.
+func NewAccountNotExisting(transactionID int) *Account {
+	return &Account{
+		Info:              DefaultAccountInfo(),
+		OriginalInfo:      DefaultAccountInfo(),
+		BlockOriginalInfo: DefaultAccountInfo(),
+		TransactionID:     transactionID,
+		Status:            AccountStatusLoadedAsNotExist,
+	}
+}
+
+// EnsureStorage initializes the Storage map if nil.
+// Must be called before writing to Storage.
+func (a *Account) EnsureStorage() {
+	if a.Storage == nil {
+		a.Storage = make(EvmStorage)
+	}
+}
+
+// --- AccountStatus flag methods ---
+
+func (a *Account) MarkTouch()   { a.Status |= AccountStatusTouched }
+func (a *Account) UnmarkTouch() { a.Status &^= AccountStatusTouched }
+func (a *Account) IsTouched() bool {
+	return a.Status&AccountStatusTouched != 0
+}
+
+func (a *Account) MarkSelfdestruct()   { a.Status |= AccountStatusSelfDestructed }
+func (a *Account) UnmarkSelfdestruct() { a.Status &^= AccountStatusSelfDestructed }
+func (a *Account) IsSelfdestructed() bool {
+	return a.Status&AccountStatusSelfDestructed != 0
+}
+
+func (a *Account) MarkCreated()   { a.Status |= AccountStatusCreated }
+func (a *Account) UnmarkCreated() { a.Status &^= AccountStatusCreated }
+func (a *Account) IsCreated() bool {
+	return a.Status&AccountStatusCreated != 0
+}
+
+func (a *Account) MarkCold() { a.Status |= AccountStatusCold }
+
+// IsColdTransactionID returns true if the account is cold for the given transaction ID.
+func (a *Account) IsColdTransactionID(transactionID int) bool {
+	return a.TransactionID != transactionID || a.Status&AccountStatusCold != 0
+}
+
+// MarkWarmWithTransactionID marks the account as warm and returns true if it was previously cold.
+func (a *Account) MarkWarmWithTransactionID(transactionID int) bool {
+	isCold := a.IsColdTransactionID(transactionID)
+	a.Status &^= AccountStatusCold
+	a.TransactionID = transactionID
+	return isCold
+}
+
+// IsCreatedLocally returns true if the account was created locally in this transaction.
+func (a *Account) IsCreatedLocally() bool {
+	return a.Status&AccountStatusCreatedLocal != 0
+}
+
+// MarkCreatedLocally marks the account as locally created and sets the global Created flag.
+// Returns true if it was created globally for the first time.
+func (a *Account) MarkCreatedLocally() bool {
+	return a.markLocalAndGlobal(AccountStatusCreatedLocal, AccountStatusCreated)
+}
+
+// UnmarkCreatedLocally removes the local created flag.
+func (a *Account) UnmarkCreatedLocally() {
+	a.Status &^= AccountStatusCreatedLocal
+}
+
+// IsSelfdestructedLocally returns true if the account was selfdestructed locally.
+func (a *Account) IsSelfdestructedLocally() bool {
+	return a.Status&AccountStatusSelfDestructLocal != 0
+}
+
+// MarkSelfdestructedLocally marks the account as locally selfdestructed and sets the global flag.
+// Returns true if it was selfdestructed globally for the first time.
+func (a *Account) MarkSelfdestructedLocally() bool {
+	return a.markLocalAndGlobal(AccountStatusSelfDestructLocal, AccountStatusSelfDestructed)
+}
+
+// UnmarkSelfdestructedLocally removes the local selfdestruct flag.
+func (a *Account) UnmarkSelfdestructedLocally() {
+	a.Status &^= AccountStatusSelfDestructLocal
+}
+
+func (a *Account) markLocalAndGlobal(local, global AccountStatus) bool {
+	a.Status |= local
+	isGlobalFirstTime := a.Status&global == 0
+	a.Status |= global
+	return isGlobalFirstTime
+}
+
+// IsLoadedAsNotExisting returns true if the account was loaded as not existing from DB.
+func (a *Account) IsLoadedAsNotExisting() bool {
+	return a.Status&AccountStatusLoadedAsNotExist != 0
+}
+
+// IsLoadedAsNotExistingNotTouched checks both not-existing and not-touched.
+func (a *Account) IsLoadedAsNotExistingNotTouched() bool {
+	return a.IsLoadedAsNotExisting() && !a.IsTouched()
+}
+
+func (a *Account) MarkPreserveEmpty() { a.Status |= AccountStatusPreserveEmpty }
+func (a *Account) IsPreserveEmpty() bool {
+	return a.Status&AccountStatusPreserveEmpty != 0
+}
+
+func (a *Account) MarkStorageCleared() { a.Status |= AccountStatusStorageCleared }
+func (a *Account) IsStorageCleared() bool {
+	return a.Status&AccountStatusStorageCleared != 0
+}
+
+// IsEmpty returns true if the account info is empty.
+func (a *Account) IsEmpty() bool {
+	return a.Info.IsEmpty()
+}
+
+// StateClearAwareIsEmpty checks emptiness accounting for the Spurious Dragon fork.
+func (a *Account) StateClearAwareIsEmpty(forkID spec.ForkID) bool {
+	if forkID.IsEnabledIn(spec.SpuriousDragon) {
+		return a.IsEmpty()
+	}
+	return a.IsLoadedAsNotExistingNotTouched()
+}
+
+// Selfdestruct clears the account's storage and resets info.
+func (a *Account) Selfdestruct() {
+	a.Storage = make(EvmStorage)
+	a.Info = DefaultAccountInfo()
+	a.MarkStorageCleared()
+}
+
+// EvmStorageSlot tracks the current value of a storage slot.
+type EvmStorageSlot struct {
+	OriginalValue      uint256.Int
+	BlockOriginalValue uint256.Int
+	PresentValue       uint256.Int
+	TransactionID      int
+	IsCold             bool
+}
+
+// NewEvmStorageSlot creates an unchanged slot for the given value.
+func NewEvmStorageSlot(original uint256.Int, transactionID int) *EvmStorageSlot {
+	return &EvmStorageSlot{
+		OriginalValue:      original,
+		BlockOriginalValue: original,
+		PresentValue:       original,
+		TransactionID:      transactionID,
+	}
+}
+
+// NewEvmStorageSlotChanged creates a changed slot.
+func NewEvmStorageSlotChanged(original, present uint256.Int, transactionID int) *EvmStorageSlot {
+	return &EvmStorageSlot{
+		OriginalValue:      original,
+		BlockOriginalValue: original,
+		PresentValue:       present,
+		TransactionID:      transactionID,
+	}
+}
+
+// IsChanged returns true if the present value differs from the original.
+func (s *EvmStorageSlot) IsChanged() bool {
+	return s.OriginalValue != s.PresentValue
+}
+
+// MarkCold marks the storage slot as cold.
+func (s *EvmStorageSlot) MarkCold() {
+	s.IsCold = true
+}
+
+// IsColdTransactionID returns true if the slot is cold for the given transaction ID.
+func (s *EvmStorageSlot) IsColdTransactionID(transactionID int) bool {
+	return s.TransactionID != transactionID || s.IsCold
+}
+
+// MarkWarmWithTransactionID marks the slot as warm and returns true if it was cold.
+// When the slot transitions from cold to warm, original_value is reset to present_value.
+func (s *EvmStorageSlot) MarkWarmWithTransactionID(transactionID int) bool {
+	isCold := s.IsColdTransactionID(transactionID)
+	if isCold {
+		// if slot is cold original value should be reset to present value.
+		s.OriginalValue = s.PresentValue
+	}
+	s.TransactionID = transactionID
+	s.IsCold = false
+	return isCold
+}

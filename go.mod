@@ -1,6 +1,6 @@
 module github.com/ethereum/go-ethereum
 
-go 1.25.5
+go 1.24.0
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.2.0
@@ -184,3 +184,5 @@ tool (
 	golang.org/x/tools/cmd/stringer
 	google.golang.org/protobuf/cmd/protoc-gen-go
 )
+
+replace github.com/Giulio2002/gevm => ./gevm
