@@ -68,6 +68,13 @@ func envEnabled() bool {
 	}
 }
 
+// Verify, when set (GETH_GEVM_VERIFY env), makes the ApplyMessage path run each
+// transaction through BOTH gevm and geth's native EVM and log any divergence in
+// gas or post-state root. The native result is authoritative, so block import
+// stays valid while mismatches are surfaced. Debugging aid only — leave it off
+// for benchmarking.
+var Verify = os.Getenv("GETH_GEVM_VERIFY") != ""
+
 // Errors surfaced by the bridge. Halts and invalid transactions don't map
 // cleanly onto geth's fine-grained vm/core errors; callers that only test for
 // failure (receipt status, benchmark success) are unaffected.
@@ -303,11 +310,21 @@ func writeBack(sdb vm.StateDB, j *gevmstate.Journal) {
 			sdb.SetNonce(gaddr, n, tracing.NonceChangeUnspecified)
 		}
 
-		// Code: gevm populates Info.Code when it deploys (CREATE) or delegates
-		// (EIP-7702); only write when the hash actually differs.
-		if acc.Info.Code != nil {
-			if h := common.Hash(acc.Info.CodeHash); h != sdb.GetCodeHash(gaddr) {
+		// Code: compare by hash so deployments (CREATE, EIP-7702 delegation)
+		// and removals (EIP-7702 delegation clear, where gevm leaves Code nil
+		// with an empty hash) are both mirrored. An unloaded-but-unchanged
+		// code also has Code nil, but its hash matches the StateDB's, so it
+		// falls through harmlessly.
+		wantHash := common.Hash(acc.Info.CodeHash)
+		if wantHash == (common.Hash{}) {
+			wantHash = types.EmptyCodeHash
+		}
+		if curHash := sdb.GetCodeHash(gaddr); wantHash != curHash {
+			if len(acc.Info.Code) > 0 {
 				sdb.SetCode(gaddr, []byte(acc.Info.Code), tracing.CodeChangeUnspecified)
+			} else if wantHash == types.EmptyCodeHash && curHash != (common.Hash{}) {
+				// The account's code was removed (delegation clear).
+				sdb.SetCode(gaddr, nil, tracing.CodeChangeUnspecified)
 			}
 		}
 

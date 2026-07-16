@@ -23,12 +23,14 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/core/vm/gevmbridge"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/crypto/kzg4844"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
 )
@@ -373,6 +375,9 @@ func ApplyMessage(evm *vm.EVM, msg *Message, gp *GasPool) (*ExecutionResult, err
 	}
 	evm.SetTxContext(NewEVMTxContext(msg))
 	if gevmbridge.Enabled {
+		if gevmbridge.Verify {
+			return applyMessageGevmVerify(evm, msg, gp)
+		}
 		return applyMessageGevm(evm, msg, gp)
 	}
 	return newStateTransition(evm, msg, gp).execute()
@@ -392,21 +397,7 @@ func applyMessageGevm(evm *vm.EVM, msg *Message, gp *GasPool) (*ExecutionResult,
 	if err := gp.CheckGasLegacy(msg.GasLimit); err != nil {
 		return nil, err
 	}
-	res := gevmbridge.RunTx(evm.StateDB, evm.Context, evm.ChainConfig(), &gevmbridge.Msg{
-		From:          msg.From,
-		To:            msg.To,
-		Nonce:         msg.Nonce,
-		Value:         msg.Value,
-		GasLimit:      msg.GasLimit,
-		GasPrice:      msg.GasPrice,
-		GasFeeCap:     msg.GasFeeCap,
-		GasTipCap:     msg.GasTipCap,
-		Data:          msg.Data,
-		AccessList:    msg.AccessList,
-		BlobHashes:    msg.BlobHashes,
-		BlobGasFeeCap: msg.BlobGasFeeCap,
-		SetCodeAuths:  msg.SetCodeAuthorizations,
-	}, false)
+	res := gevmbridge.RunTx(evm.StateDB, evm.Context, evm.ChainConfig(), bridgeMsg(msg), false)
 	if res.Invalid {
 		// A validation failure makes the transaction (and thus the block)
 		// invalid; surface it as an error like the native path does.
@@ -423,6 +414,75 @@ func applyMessageGevm(evm *vm.EVM, msg *Message, gp *GasPool) (*ExecutionResult,
 		Err:        res.Err,
 		ReturnData: res.ReturnData,
 	}, nil
+}
+
+// bridgeMsg converts a core.Message into the backend-neutral bridge message.
+func bridgeMsg(msg *Message) *gevmbridge.Msg {
+	return &gevmbridge.Msg{
+		From:          msg.From,
+		To:            msg.To,
+		Nonce:         msg.Nonce,
+		Value:         msg.Value,
+		GasLimit:      msg.GasLimit,
+		GasPrice:      msg.GasPrice,
+		GasFeeCap:     msg.GasFeeCap,
+		GasTipCap:     msg.GasTipCap,
+		Data:          msg.Data,
+		AccessList:    msg.AccessList,
+		BlobHashes:    msg.BlobHashes,
+		BlobGasFeeCap: msg.BlobGasFeeCap,
+		SetCodeAuths:  msg.SetCodeAuthorizations,
+	}
+}
+
+// applyMessageGevmVerify runs the transaction through both gevm (on a throwaway
+// state copy) and geth's native StateTransition (authoritative, on the real
+// state), then logs any divergence in gas or post-state root. Because the native
+// result is returned and committed, block import stays valid while mismatches are
+// reported — letting a full import surface exactly which transaction diverges.
+// Enabled via GETH_GEVM_VERIFY. Debugging only; it is slow (two state copies +
+// two root computations per transaction).
+func applyMessageGevmVerify(evm *vm.EVM, msg *Message, gp *GasPool) (*ExecutionResult, error) {
+	sdb, ok := evm.StateDB.(*state.StateDB)
+	if !ok {
+		// Can't snapshot/root a non-*state.StateDB; fall back to plain gevm.
+		return applyMessageGevm(evm, msg, gp)
+	}
+	deleteEmpty := evm.ChainConfig().IsEIP158(evm.Context.BlockNumber)
+
+	// gevm shadow on a throwaway copy (does not touch the authoritative state).
+	gsdb := sdb.Copy()
+	gres := gevmbridge.RunTx(gsdb, evm.Context, evm.ChainConfig(), bridgeMsg(msg), false)
+	var gRoot common.Hash
+	if !gres.Invalid {
+		gRoot = gsdb.IntermediateRoot(deleteEmpty)
+	}
+
+	// Native, authoritative, on the real state.
+	res, err := newStateTransition(evm, msg, gp).execute()
+	var (
+		nRoot common.Hash
+		nGas  uint64
+	)
+	if err == nil {
+		nGas = res.UsedGas
+		nRoot = sdb.Copy().IntermediateRoot(deleteEmpty) // copy: don't finalise the live state
+	}
+
+	gInvalid, nInvalid := gres.Invalid, err != nil
+	diverged := gInvalid != nInvalid
+	if !gInvalid && !nInvalid {
+		diverged = gres.GasUsed != nGas || gRoot != nRoot
+	}
+	if diverged {
+		log.Warn("gevm consensus divergence",
+			"block", evm.Context.BlockNumber,
+			"from", msg.From, "to", msg.To, "nonce", msg.Nonce,
+			"gevmGas", gres.GasUsed, "nativeGas", nGas,
+			"gevmRoot", gRoot, "nativeRoot", nRoot,
+			"gevmErr", gres.Err, "nativeErr", err)
+	}
+	return res, err
 }
 
 // stateTransition represents a state transition.
