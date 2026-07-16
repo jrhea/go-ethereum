@@ -397,7 +397,14 @@ func applyMessageGevm(evm *vm.EVM, msg *Message, gp *GasPool) (*ExecutionResult,
 	if err := gp.CheckGasLegacy(msg.GasLimit); err != nil {
 		return nil, err
 	}
-	res := gevmbridge.RunTx(evm.StateDB, evm.Context, evm.ChainConfig(), bridgeMsg(msg), false)
+	bm := bridgeMsg(msg)
+	// gevm has no skip-nonce flag; satisfy its strict check with the live
+	// nonce instead. Callers that set this (prefetcher, eth_call) discard or
+	// never see nonce effects, so this is safe.
+	if msg.SkipNonceChecks {
+		bm.Nonce = evm.StateDB.GetNonce(msg.From)
+	}
+	res := gevmbridge.RunTx(evm.StateDB, evm.Context, evm.ChainConfig(), bm, false)
 	if res.Invalid {
 		// A validation failure makes the transaction (and thus the block)
 		// invalid; surface it as an error like the native path does.
