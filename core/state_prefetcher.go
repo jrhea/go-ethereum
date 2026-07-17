@@ -19,6 +19,7 @@ package core
 import (
 	"bytes"
 	"runtime"
+	"sort"
 	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -49,22 +50,31 @@ func newStatePrefetcher(config *params.ChainConfig, chain *HeaderChain) *statePr
 // Prefetch processes the state changes according to the Ethereum rules by running
 // the transaction messages using the statedb, but any changes are discarded. The
 // only goal is to warm the state caches.
-func (p *statePrefetcher) Prefetch(block *types.Block, statedb *state.StateDB, jumpDestCache vm.JumpDestCache, precompileCache *vm.PrecompileCache, cfg vm.Config, interrupt *atomic.Bool) {
+func (p *statePrefetcher) Prefetch(block *types.Block, statedb *state.StateDB, jumpDestCache vm.JumpDestCache, precompileCache *vm.PrecompileCache, cfg vm.Config, interrupt *atomic.Bool, execIndex *atomic.Int64) {
 	var (
 		fails   atomic.Int64
+		skips   atomic.Int64
 		header  = block.Header()
 		signer  = types.MakeSigner(p.config, header.Number, header.Time)
 		workers errgroup.Group
 		reader  = statedb.Reader()
+		txs     = block.Transactions()
 	)
 	workers.SetLimit(max(1, 4*runtime.NumCPU()/5)) // Aggressively run the prefetching
 
 	// Iterate over and process the individual transactions
-	for i, tx := range block.Transactions() {
+	for _, n := range prefetchOrder(txs) {
+		i, tx := n, txs[n]
 		stateCpy := statedb.Copy() // closure
 		workers.Go(func() error {
 			// If block precaching was interrupted, abort
 			if interrupt != nil && interrupt.Load() {
+				return nil
+			}
+			// Skip transactions the main pass has already reached, warming
+			// them up can not help anymore.
+			if execIndex != nil && execIndex.Load() >= int64(i) {
+				skips.Add(1)
 				return nil
 			}
 			// Preload the touched accounts and storage slots in advance
@@ -123,7 +133,24 @@ func (p *statePrefetcher) Prefetch(block *types.Block, statedb *state.StateDB, j
 	}
 	workers.Wait()
 
-	blockPrefetchTxsValidMeter.Mark(int64(len(block.Transactions())) - fails.Load())
+	blockPrefetchTxsValidMeter.Mark(int64(len(txs)) - fails.Load() - skips.Load())
 	blockPrefetchTxsInvalidMeter.Mark(fails.Load())
+	blockPrefetchTxsSkippedMeter.Mark(skips.Load())
 	return
+}
+
+// prefetchOrder returns the submission order of the block transactions,
+// heaviest gas first. The early worker slots go to the transactions that are
+// costliest to lose to the main pass, instead of racing it near the head of
+// the block. The stable sort keeps equally priced transactions in block
+// order.
+func prefetchOrder(txs types.Transactions) []int {
+	order := make([]int, len(txs))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		return txs[order[a]].Gas() > txs[order[b]].Gas()
+	})
+	return order
 }
