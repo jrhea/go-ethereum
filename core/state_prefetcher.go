@@ -139,18 +139,29 @@ func (p *statePrefetcher) Prefetch(block *types.Block, statedb *state.StateDB, j
 	return
 }
 
+// prefetchPromoteGas is the gas limit above which a transaction is promoted
+// to the front of the prefetch queue. Below it the worker pool keeps up with
+// the main pass in block order anyway.
+const prefetchPromoteGas = 1_000_000
+
 // prefetchOrder returns the submission order of the block transactions,
-// heaviest gas first. The early worker slots go to the transactions that are
-// costliest to lose to the main pass, instead of racing it near the head of
-// the block. The stable sort keeps equally priced transactions in block
-// order.
+// promoted heavy transactions first, the rest in block order. Heavy work
+// needs the lead time over the main pass, while the light stream warms
+// state just ahead of it.
 func prefetchOrder(txs types.Transactions) []int {
-	order := make([]int, len(txs))
-	for i := range order {
-		order[i] = i
+	order := make([]int, 0, len(txs))
+	for i, tx := range txs {
+		if tx.Gas() >= prefetchPromoteGas {
+			order = append(order, i)
+		}
 	}
 	sort.SliceStable(order, func(a, b int) bool {
 		return txs[order[a]].Gas() > txs[order[b]].Gas()
 	})
+	for i, tx := range txs {
+		if tx.Gas() < prefetchPromoteGas {
+			order = append(order, i)
+		}
+	}
 	return order
 }
