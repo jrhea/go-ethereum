@@ -20,12 +20,7 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 )
-
-// executionCacheMaxEntries bounds the number of retained state entries. The
-// content is dropped and rebuilt once the limit is exceeded.
-const executionCacheMaxEntries = 2 * 1024 * 1024
 
 // ExecutionCache retains the state reader cache shared by the prefetcher and
 // block processing across blocks, so the hot read set does not start cold on
@@ -38,7 +33,7 @@ const executionCacheMaxEntries = 2 * 1024 * 1024
 // concurrent one.
 type ExecutionCache struct {
 	mu    sync.Mutex // held from checkout until release
-	cache *stateReaderWithCache
+	cache *fixedStateCache
 	root  common.Hash
 }
 
@@ -48,15 +43,18 @@ func NewExecutionCache() *ExecutionCache {
 }
 
 // use checks the cache out for a block built on the given root, reusing the
-// retained content on a tag match and starting fresh otherwise. The wrapped
+// retained content on a tag match and invalidating it otherwise. The wrapped
 // state reader is swapped either way. The internal lock is held until Release
 // is called.
-func (ec *ExecutionCache) use(root common.Hash, underlying StateReader) *stateReaderWithCache {
+func (ec *ExecutionCache) use(root common.Hash, underlying StateReader) *fixedStateCache {
 	ec.mu.Lock()
-	if ec.cache == nil || ec.root != root || ec.cache.entries.Load() > executionCacheMaxEntries {
-		ec.cache = newStateReaderWithCache(underlying)
+	if ec.cache == nil {
+		ec.cache = newFixedStateCache(underlying, fixedAccountCacheBits, fixedStorageCacheBits)
 	} else {
 		ec.cache.StateReader = underlying
+		if ec.root != root {
+			ec.cache.reset()
+		}
 	}
 	ec.root = root
 	return ec.cache
@@ -74,60 +72,9 @@ func (ec *ExecutionCache) Release(update *StateUpdate) {
 			ec.root = update.Root
 		} else {
 			// The settled block does not descend from the checkout root.
-			// This is not expected to happen, drop the content to be safe.
-			ec.cache = nil
+			// This is not expected to happen, invalidate to be safe.
+			ec.cache.reset()
 		}
 	}
 	ec.mu.Unlock()
-}
-
-// applyUpdate folds a block state diff into the cached entries, keeping them
-// valid for the child state.
-func (r *stateReaderWithCache) applyUpdate(update *StateUpdate) {
-	// Refresh the mutated accounts. A nil account is a valid cache entry
-	// meaning nonexistent, so deletions stay warm too.
-	hashes := make(map[common.Address]common.Hash, len(update.AccountsOrigin))
-
-	r.accountLock.Lock()
-	for addr := range update.AccountsOrigin {
-		addrHash := crypto.Keccak256Hash(addr.Bytes())
-		hashes[addr] = addrHash
-		if _, ok := r.accounts[addr]; !ok {
-			r.entries.Add(1)
-		}
-		r.accounts[addr] = update.Accounts[addrHash]
-	}
-	r.accountLock.Unlock()
-
-	// Refresh the mutated storage slots. With plain keyed origins every
-	// touched slot is enumerable and rewritten precisely, deleted slots
-	// become zero valued entries. With hashed keys the plain slot keys are
-	// unknown, so the per account submaps are dropped instead.
-	for addr, slots := range update.StoragesOrigin {
-		bucket := &r.storageBuckets[addr[0]&0x0f]
-
-		bucket.lock.Lock()
-		if update.StorageKeyType != StorageKeyPlain {
-			delete(bucket.storages, addr)
-			bucket.lock.Unlock()
-			continue
-		}
-		cached, ok := bucket.storages[addr]
-		if !ok {
-			cached = make(map[common.Hash]common.Hash, len(slots))
-			bucket.storages[addr] = cached
-		}
-		addrHash, ok := hashes[addr]
-		if !ok {
-			addrHash = crypto.Keccak256Hash(addr.Bytes())
-		}
-		post := update.Storages[addrHash]
-		for key := range slots {
-			if _, ok := cached[key]; !ok {
-				r.entries.Add(1)
-			}
-			cached[key] = post[crypto.Keccak256Hash(key.Bytes())]
-		}
-		bucket.lock.Unlock()
-	}
 }

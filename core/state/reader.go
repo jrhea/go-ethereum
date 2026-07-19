@@ -387,10 +387,6 @@ func (r *multiStateReader) Storage(addr common.Address, slot common.Hash) (commo
 type stateReaderWithCache struct {
 	StateReader
 
-	// Approximate number of cached entries, used to bound the memory of
-	// caches retained across blocks.
-	entries atomic.Int64
-
 	// Previously resolved state entries.
 	accounts    map[common.Address]*types.StateAccount
 	accountLock sync.RWMutex
@@ -436,9 +432,6 @@ func (r *stateReaderWithCache) account(addr common.Address) (*types.StateAccount
 		return nil, false, err
 	}
 	r.accountLock.Lock()
-	if _, ok := r.accounts[addr]; !ok {
-		r.entries.Add(1)
-	}
 	r.accounts[addr] = acct
 	r.accountLock.Unlock()
 	return acct, false, nil
@@ -483,9 +476,6 @@ func (r *stateReaderWithCache) storage(addr common.Address, slot common.Hash) (c
 		slots = make(map[common.Hash]common.Hash)
 		bucket.storages[addr] = slots
 	}
-	if _, ok := slots[slot]; !ok {
-		r.entries.Add(1)
-	}
 	slots[slot] = value
 	bucket.lock.Unlock()
 
@@ -502,10 +492,19 @@ func (r *stateReaderWithCache) Storage(addr common.Address, slot common.Hash) (c
 	return value, err
 }
 
-// stateReaderWithStats is a wrapper over the stateReaderWithCache, tracking
+// cachingStateReader is a state reader with a local entry cache, reporting
+// for each read whether it was served from the cache.
+type cachingStateReader interface {
+	StateReader
+
+	account(addr common.Address) (*types.StateAccount, bool, error)
+	storage(addr common.Address, slot common.Hash) (common.Hash, bool, error)
+}
+
+// stateReaderWithStats is a wrapper over a caching state reader, tracking
 // the cache hit statistics of the reader.
 type stateReaderWithStats struct {
-	*stateReaderWithCache
+	cachingStateReader
 
 	accountCacheHit  atomic.Int64
 	accountCacheMiss atomic.Int64
@@ -514,9 +513,9 @@ type stateReaderWithStats struct {
 }
 
 // newReaderWithStats constructs the state reader with additional statistics tracked.
-func newStateReaderWithStats(sr *stateReaderWithCache) *stateReaderWithStats {
+func newStateReaderWithStats(sr cachingStateReader) *stateReaderWithStats {
 	return &stateReaderWithStats{
-		stateReaderWithCache: sr,
+		cachingStateReader: sr,
 	}
 }
 
@@ -525,7 +524,7 @@ func newStateReaderWithStats(sr *stateReaderWithCache) *stateReaderWithStats {
 //
 // An error will be returned if the state is corrupted in the underlying reader.
 func (r *stateReaderWithStats) Account(addr common.Address) (*types.StateAccount, error) {
-	account, incache, err := r.stateReaderWithCache.account(addr)
+	account, incache, err := r.cachingStateReader.account(addr)
 	if err != nil {
 		return nil, err
 	}
@@ -543,7 +542,7 @@ func (r *stateReaderWithStats) Account(addr common.Address) (*types.StateAccount
 //
 // An error will be returned if the state is corrupted in the underlying reader.
 func (r *stateReaderWithStats) Storage(addr common.Address, slot common.Hash) (common.Hash, error) {
-	value, incache, err := r.stateReaderWithCache.storage(addr, slot)
+	value, incache, err := r.cachingStateReader.storage(addr, slot)
 	if err != nil {
 		return common.Hash{}, err
 	}

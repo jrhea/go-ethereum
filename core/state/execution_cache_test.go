@@ -17,6 +17,7 @@
 package state
 
 import (
+	"sync/atomic"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -29,16 +30,16 @@ import (
 type stubCountingReader struct {
 	accounts map[common.Address]*types.StateAccount
 	storages map[common.Address]map[common.Hash]common.Hash
-	reads    int
+	reads    atomic.Int64
 }
 
 func (r *stubCountingReader) Account(addr common.Address) (*types.StateAccount, error) {
-	r.reads++
+	r.reads.Add(1)
 	return r.accounts[addr], nil
 }
 
 func (r *stubCountingReader) Storage(addr common.Address, slot common.Hash) (common.Hash, error) {
-	r.reads++
+	r.reads.Add(1)
 	return r.storages[addr][slot], nil
 }
 
@@ -59,8 +60,8 @@ func TestExecutionCacheReuse(t *testing.T) {
 	cache := ec.use(rootA, underlying)
 	cache.Account(addr)
 	cache.Storage(addr, slot)
-	if underlying.reads != 2 {
-		t.Fatalf("expected 2 underlying reads, got %d", underlying.reads)
+	if underlying.reads.Load() != 2 {
+		t.Fatalf("expected 2 underlying reads, got %d", underlying.reads.Load())
 	}
 	ec.Release(&StateUpdate{OriginRoot: rootA, Root: rootB})
 
@@ -68,24 +69,24 @@ func TestExecutionCacheReuse(t *testing.T) {
 	cache = ec.use(rootB, underlying)
 	cache.Account(addr)
 	cache.Storage(addr, slot)
-	if underlying.reads != 2 {
-		t.Fatalf("cache not reused, %d underlying reads", underlying.reads)
+	if underlying.reads.Load() != 2 {
+		t.Fatalf("cache not reused, %d underlying reads", underlying.reads.Load())
 	}
 	ec.Release(nil)
 
 	// A failed or discarded block keeps the content valid for its root.
 	cache = ec.use(rootB, underlying)
 	cache.Account(addr)
-	if underlying.reads != 2 {
-		t.Fatalf("cache not retained after nil release, %d underlying reads", underlying.reads)
+	if underlying.reads.Load() != 2 {
+		t.Fatalf("cache not retained after nil release, %d underlying reads", underlying.reads.Load())
 	}
 	ec.Release(nil)
 
 	// A mismatching parent root must start over.
 	cache = ec.use(common.Hash{0xcc}, underlying)
 	cache.Account(addr)
-	if underlying.reads != 3 {
-		t.Fatalf("cache not reset on root mismatch, %d underlying reads", underlying.reads)
+	if underlying.reads.Load() != 3 {
+		t.Fatalf("cache not reset on root mismatch, %d underlying reads", underlying.reads.Load())
 	}
 	ec.Release(nil)
 }
@@ -126,7 +127,7 @@ func TestExecutionCacheApply(t *testing.T) {
 	})
 
 	// The refreshed values must be served without underlying reads.
-	underlying.reads = 0
+	underlying.reads.Store(0)
 	cache = ec.use(rootB, underlying)
 	if acct, _ := cache.Account(addr); acct.Nonce != 2 {
 		t.Fatalf("account not refreshed, nonce %d", acct.Nonce)
@@ -137,8 +138,8 @@ func TestExecutionCacheApply(t *testing.T) {
 	if val, _ := cache.Storage(addr, slotB); val != (common.Hash{}) {
 		t.Fatalf("deleted slot not zeroed, got %x", val)
 	}
-	if underlying.reads != 0 {
-		t.Fatalf("refreshed entries not served from cache, %d underlying reads", underlying.reads)
+	if underlying.reads.Load() != 0 {
+		t.Fatalf("refreshed entries not served from cache, %d underlying reads", underlying.reads.Load())
 	}
 	ec.Release(nil)
 }
@@ -169,14 +170,14 @@ func TestExecutionCacheApplyHashedKeys(t *testing.T) {
 		StorageKeyType: StorageKeyHashed,
 	})
 	underlying.storages[addr][slotA] = common.Hash{9}
-	underlying.reads = 0
+	underlying.reads.Store(0)
 
 	cache = ec.use(rootB, underlying)
 	if val, _ := cache.Storage(addr, slotA); val != (common.Hash{9}) {
 		t.Fatalf("stale slot served after hashed key update, got %x", val)
 	}
-	if underlying.reads != 1 {
-		t.Fatalf("expected an underlying read after invalidation, got %d", underlying.reads)
+	if underlying.reads.Load() != 1 {
+		t.Fatalf("expected an underlying read after invalidation, got %d", underlying.reads.Load())
 	}
 	ec.Release(nil)
 }
@@ -196,11 +197,11 @@ func TestExecutionCacheLineageMismatch(t *testing.T) {
 	// An update not anchored on the checkout root must drop the content.
 	ec.Release(&StateUpdate{OriginRoot: common.Hash{0xdd}, Root: common.Hash{0xee}})
 
-	underlying.reads = 0
+	underlying.reads.Store(0)
 	cache = ec.use(rootA, underlying)
 	cache.Account(addr)
-	if underlying.reads != 1 {
-		t.Fatalf("cache not dropped on lineage mismatch, %d underlying reads", underlying.reads)
+	if underlying.reads.Load() != 1 {
+		t.Fatalf("cache not dropped on lineage mismatch, %d underlying reads", underlying.reads.Load())
 	}
 	ec.Release(nil)
 }

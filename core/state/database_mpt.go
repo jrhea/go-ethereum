@@ -109,7 +109,7 @@ func (db *MPTDatabase) ReadersWithCacheStats(stateRoot common.Hash, ec *Executio
 	if err != nil {
 		return nil, nil, err
 	}
-	var sr *stateReaderWithCache
+	var sr cachingStateReader
 	if ec != nil {
 		sr = ec.use(stateRoot, r)
 	} else {
