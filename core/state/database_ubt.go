@@ -98,13 +98,19 @@ func (db *UBTDatabase) Reader(stateRoot common.Hash) (Reader, error) {
 
 // ReadersWithCacheStats creates a pair of state readers that share the same
 // underlying state reader and internal state cache, while maintaining separate
-// statistics respectively.
-func (db *UBTDatabase) ReadersWithCacheStats(stateRoot common.Hash) (Reader, Reader, error) {
+// statistics respectively. When an execution cache is provided, it is checked
+// out as the shared cache, carrying warm entries over from the previous block.
+func (db *UBTDatabase) ReadersWithCacheStats(stateRoot common.Hash, ec *ExecutionCache) (Reader, Reader, error) {
 	r, err := db.StateReader(stateRoot)
 	if err != nil {
 		return nil, nil, err
 	}
-	sr := newStateReaderWithCache(r)
+	var sr *stateReaderWithCache
+	if ec != nil {
+		sr = ec.use(stateRoot, r)
+	} else {
+		sr = newStateReaderWithCache(r)
+	}
 	ra := newReader(db.codedb.Reader(), newStateReaderWithStats(sr))
 	rb := newReader(db.codedb.Reader(), newStateReaderWithStats(sr))
 	return ra, rb, nil

@@ -387,6 +387,10 @@ func (r *multiStateReader) Storage(addr common.Address, slot common.Hash) (commo
 type stateReaderWithCache struct {
 	StateReader
 
+	// Approximate number of cached entries, used to bound the memory of
+	// caches retained across blocks.
+	entries atomic.Int64
+
 	// Previously resolved state entries.
 	accounts    map[common.Address]*types.StateAccount
 	accountLock sync.RWMutex
@@ -432,6 +436,9 @@ func (r *stateReaderWithCache) account(addr common.Address) (*types.StateAccount
 		return nil, false, err
 	}
 	r.accountLock.Lock()
+	if _, ok := r.accounts[addr]; !ok {
+		r.entries.Add(1)
+	}
 	r.accounts[addr] = acct
 	r.accountLock.Unlock()
 	return acct, false, nil
@@ -475,6 +482,9 @@ func (r *stateReaderWithCache) storage(addr common.Address, slot common.Hash) (c
 	if !ok {
 		slots = make(map[common.Hash]common.Hash)
 		bucket.storages[addr] = slots
+	}
+	if _, ok := slots[slot]; !ok {
+		r.entries.Add(1)
 	}
 	slots[slot] = value
 	bucket.lock.Unlock()

@@ -334,6 +334,7 @@ type BlockChain struct {
 	codedb          *state.CodeDB                    // The database handler for maintaining contract codes.
 	jumpDestCache   vm.JumpDestCache                 // Shared JUMPDEST analysis cache for block processing
 	precompileCache *vm.PrecompileCache              // Shared precompile result cache for block processing, nil when disabled
+	executionCache  *state.ExecutionCache            // State read cache carried across blocks between prefetcher and processor
 	txIndexer       *txIndexer                       // Transaction indexer, might be nil if not enabled
 
 	hc               *HeaderChain
@@ -417,6 +418,7 @@ func NewBlockChain(db ethdb.Database, genesis *Genesis, engine consensus.Engine,
 		triedb:             triedb,
 		codedb:             state.NewCodeDB(db),
 		jumpDestCache:      NewJumpDestCache(),
+		executionCache:     state.NewExecutionCache(),
 		triegc:             prque.New[int64, common.Hash](nil),
 		chainmu:            syncx.NewClosableMutex(),
 		bodyCache:          lru.NewCache[common.Hash, *types.Body](bodyCacheLimit),
@@ -1662,9 +1664,9 @@ func (bc *BlockChain) writeKnownBlock(block *types.Block) error {
 
 // writeBlockWithState writes block, metadata and corresponding state data to the
 // database.
-func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.Receipt, statedb *state.StateDB) error {
+func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.Receipt, statedb *state.StateDB) (*state.StateUpdate, error) {
 	if !bc.HasHeader(block.ParentHash(), block.NumberU64()-1) {
-		return consensus.ErrUnknownAncestor
+		return nil, consensus.ErrUnknownAncestor
 	}
 	// Irrelevant of the canonical status, write the block itself to the database.
 	//
@@ -1685,43 +1687,33 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	log.Debug("Committed block data", "size", common.StorageSize(batch.ValueSize()), "elapsed", common.PrettyDuration(time.Since(start)))
 
 	var (
-		err           error
-		root          common.Hash
 		isEIP158      = bc.chainConfig.IsEIP158(block.Number())
 		isCancun      = bc.chainConfig.IsCancun(block.Number(), block.Time())
 		hasStateHook  = bc.logger != nil && bc.logger.OnStateUpdate != nil
 		hasStateSizer = bc.stateSizer != nil
 	)
-	if hasStateHook || hasStateSizer {
-		r, update, err := statedb.CommitWithUpdate(block.NumberU64(), isEIP158, isCancun)
+	root, update, err := statedb.CommitWithUpdate(block.NumberU64(), isEIP158, isCancun)
+	if err != nil {
+		return nil, err
+	}
+	if hasStateHook {
+		trUpdate, err := update.ToTracingUpdate()
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if hasStateHook {
-			trUpdate, err := update.ToTracingUpdate()
-			if err != nil {
-				return err
-			}
-			bc.logger.OnStateUpdate(trUpdate)
-		}
-		if hasStateSizer {
-			bc.stateSizer.Notify(update)
-		}
-		root = r
-	} else {
-		root, err = statedb.Commit(block.NumberU64(), isEIP158, isCancun)
-		if err != nil {
-			return err
-		}
+		bc.logger.OnStateUpdate(trUpdate)
+	}
+	if hasStateSizer {
+		bc.stateSizer.Notify(update)
 	}
 	// If node is running in path mode, skip explicit gc operation
 	// which is unnecessary in this mode.
 	if bc.triedb.Scheme() == rawdb.PathScheme {
-		return nil
+		return update, nil
 	}
 	// If we're running an archive node, always flush
 	if bc.cfg.ArchiveMode {
-		return bc.triedb.Commit(root, false)
+		return update, bc.triedb.Commit(root, false)
 	}
 	// Full but not archive node, do proper garbage collection
 	bc.triedb.Reference(root, common.Hash{}) // metadata reference to keep trie alive
@@ -1730,7 +1722,7 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 	// Flush limits are not considered for the first TriesInMemory blocks.
 	current := block.NumberU64()
 	if current <= state.TriesInMemory {
-		return nil
+		return update, nil
 	}
 	// If we exceeded our memory allowance, flush matured singleton nodes to disk
 	var (
@@ -1771,21 +1763,22 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 		}
 		bc.triedb.Dereference(root)
 	}
-	return nil
+	return update, nil
 }
 
 // writeBlockAndSetHead is the internal implementation of WriteBlockAndSetHead.
 // This function expects the chain mutex to be held.
-func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types.Receipt, logs []*types.Log, state *state.StateDB, emitHeadEvent bool) (status WriteStatus, err error) {
-	if err := bc.writeBlockWithState(block, receipts, state); err != nil {
-		return NonStatTy, err
+func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types.Receipt, logs []*types.Log, statedb *state.StateDB, emitHeadEvent bool) (status WriteStatus, update *state.StateUpdate, err error) {
+	update, err = bc.writeBlockWithState(block, receipts, statedb)
+	if err != nil {
+		return NonStatTy, nil, err
 	}
 	currentBlock := bc.CurrentBlock()
 
 	// Reorganise the chain if the parent is not the head block
 	if block.ParentHash() != currentBlock.Hash() {
 		if err := bc.reorg(currentBlock, block.Header()); err != nil {
-			return NonStatTy, err
+			return NonStatTy, nil, err
 		}
 	}
 
@@ -1809,7 +1802,7 @@ func (bc *BlockChain) writeBlockAndSetHead(block *types.Block, receipts []*types
 	if emitHeadEvent {
 		bc.chainHeadFeed.Send(ChainHeadEvent{Header: block.Header()})
 	}
-	return CanonStatTy, nil
+	return CanonStatTy, update, nil
 }
 
 // InsertChain attempts to insert the given batch of blocks in to the canonical
@@ -2135,12 +2128,13 @@ type ExecuteConfig struct {
 // it writes the block and associated state to database.
 func (bc *BlockChain) ProcessBlock(ctx context.Context, parentRoot common.Hash, block *types.Block, config ExecuteConfig) (result *blockProcessingResult, blockEndErr error) {
 	var (
-		err       error
-		startTime = time.Now()
-		statedb   *state.StateDB
-		interrupt atomic.Bool
-		execIndex atomic.Int64
-		sdb       state.Database
+		err            error
+		startTime      = time.Now()
+		statedb        *state.StateDB
+		interrupt      atomic.Bool
+		execIndex      atomic.Int64
+		sdb            state.Database
+		setFinalUpdate = func(*state.StateUpdate) {}
 	)
 	defer interrupt.Store(true) // terminate the prefetch at the end
 	execIndex.Store(-1)         // no transaction executed yet
@@ -2158,8 +2152,10 @@ func (bc *BlockChain) ProcessBlock(ctx context.Context, parentRoot common.Hash, 
 	type prewarmReader interface {
 		// ReadersWithCacheStats creates a pair of state readers that share the
 		// same underlying state reader and internal state cache, while maintaining
-		// separate statistics respectively.
-		ReadersWithCacheStats(stateRoot common.Hash) (state.Reader, state.Reader, error)
+		// separate statistics respectively. The provided execution cache is
+		// checked out as the shared cache, carrying warm entries over from the
+		// previous block.
+		ReadersWithCacheStats(stateRoot common.Hash, ec *state.ExecutionCache) (state.Reader, state.Reader, error)
 	}
 	warmer, ok := sdb.(prewarmReader)
 
@@ -2174,16 +2170,26 @@ func (bc *BlockChain) ProcessBlock(ctx context.Context, parentRoot common.Hash, 
 		//
 		// Note: the main processor and prefetcher share the same reader with a local
 		// cache for mitigating the overhead of state access.
-		prefetch, process, err := warmer.ReadersWithCacheStats(parentRoot)
+		prefetch, process, err := warmer.ReadersWithCacheStats(parentRoot, bc.executionCache)
 		if err != nil {
 			return nil, err
 		}
+		// The execution cache is checked out now. It is handed back by the
+		// prefetch goroutine once all its workers stopped writing, folding in
+		// the state diff of the block if it settled successfully.
+		var finalUpdate *state.StateUpdate
+		updateCh := make(chan *state.StateUpdate, 1)
+		defer func() { updateCh <- finalUpdate }()
+		setFinalUpdate = func(update *state.StateUpdate) { finalUpdate = update }
+
 		throwaway, err := state.NewWithReader(parentRoot, sdb, prefetch)
 		if err != nil {
+			bc.executionCache.Release(nil)
 			return nil, err
 		}
 		statedb, err = state.NewWithReader(parentRoot, sdb, process)
 		if err != nil {
+			bc.executionCache.Release(nil)
 			return nil, err
 		}
 		// Upload the statistics of reader at the end
@@ -2207,6 +2213,9 @@ func (bc *BlockChain) ProcessBlock(ctx context.Context, parentRoot common.Hash, 
 			if interrupt.Load() {
 				blockPrefetchInterruptMeter.Mark(1)
 			}
+			// All cache writers are done, settle the execution cache with
+			// the outcome of the block.
+			bc.executionCache.Release(<-updateCh)
 		}(time.Now(), throwaway, block)
 	}
 
@@ -2332,18 +2341,24 @@ func (bc *BlockChain) ProcessBlock(ctx context.Context, parentRoot common.Hash, 
 	}
 
 	// Write the block to the chain and get the status.
-	var status WriteStatus
+	var (
+		status WriteStatus
+		update *state.StateUpdate
+	)
 	if config.WriteState {
 		wstart := time.Now()
 		if !config.WriteHead {
 			// Don't set the head, only insert the block
-			err = bc.writeBlockWithState(block, res.Receipts, statedb)
+			update, err = bc.writeBlockWithState(block, res.Receipts, statedb)
 		} else {
-			status, err = bc.writeBlockAndSetHead(block, res.Receipts, res.Logs, statedb, false)
+			status, update, err = bc.writeBlockAndSetHead(block, res.Receipts, res.Logs, statedb, false)
 		}
 		if err != nil {
 			return nil, err
 		}
+		// The block has settled, let the state diff move the execution cache
+		// onto the child state.
+		setFinalUpdate(update)
 		// Update the metrics touched during block commit
 		stats.AccountCommits = statedb.AccountCommits  // Account commits are complete, we can mark them
 		stats.StorageCommits = statedb.StorageCommits  // Storage commits are complete, we can mark them
