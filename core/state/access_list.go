@@ -29,6 +29,15 @@ type accessList struct {
 	addresses map[common.Address]int
 	slots     []map[common.Hash]struct{}
 
+	// SLOAD and SSTORE always ask about the account they are executing in, so the
+	// slot lookups arrive in long runs of one address. Remembering where the last
+	// one landed turns the address probe into a compare for the rest of the run,
+	// leaving just the slot probe. lastIdx mirrors what the addresses map holds,
+	// and every write that could invalidate it clears lastOK.
+	lastAddr common.Address
+	lastIdx  int
+	lastOK   bool
+
 	// Precompiles are warm in every transaction, so they are held here for the
 	// fork instead of being re-inserted above on every one. The sender, the
 	// destination and the coinbase stay in the map, one address each, which leaves
@@ -52,6 +61,7 @@ func (al *accessList) prewarmed(address common.Address) bool {
 func (al *accessList) reset(precompiles []common.Address) {
 	clear(al.addresses)
 	al.slots = al.slots[:0]
+	al.lastOK = false
 
 	// ActivePrecompiles returns the same package level slice for a given fork, so
 	// equal pointers mean the map still stands. The length test also keeps the
@@ -78,7 +88,7 @@ func (al *accessList) ContainsAddress(address common.Address) bool {
 // Contains checks if a slot within an account is present in the access list, returning
 // separate flags for the presence of the account and the slot respectively.
 func (al *accessList) Contains(address common.Address, slot common.Hash) (addressPresent bool, slotPresent bool) {
-	idx, ok := al.addresses[address]
+	idx, ok := al.lookup(address)
 	if !ok {
 		// no such address (and hence zero slots)
 		return al.prewarmed(address), false
@@ -89,6 +99,19 @@ func (al *accessList) Contains(address common.Address, slot common.Hash) (addres
 	}
 	_, slotPresent = al.slots[idx][slot]
 	return true, slotPresent
+}
+
+// lookup resolves an address to its slot-set index, serving the repeat of the
+// previous address from the memo.
+func (al *accessList) lookup(address common.Address) (int, bool) {
+	if al.lastOK && al.lastAddr == address {
+		return al.lastIdx, true
+	}
+	idx, ok := al.addresses[address]
+	if ok {
+		al.lastAddr, al.lastIdx, al.lastOK = address, idx, true
+	}
+	return idx, ok
 }
 
 // newAccessList creates a new accessList.
@@ -120,6 +143,7 @@ func (al *accessList) AddAddress(address common.Address) bool {
 		return false
 	}
 	al.addresses[address] = -1
+	al.lastAddr, al.lastIdx, al.lastOK = address, -1, true
 	return true
 }
 
@@ -129,10 +153,11 @@ func (al *accessList) AddAddress(address common.Address) bool {
 // - slot added
 // For any 'true' value returned, a corresponding journal entry must be made.
 func (al *accessList) AddSlot(address common.Address, slot common.Hash) (addrChange bool, slotChange bool) {
-	idx, addrPresent := al.addresses[address]
+	idx, addrPresent := al.lookup(address)
 	if !addrPresent || idx == -1 {
 		// Address not present, or addr present but no slots there
 		al.addresses[address] = len(al.slots)
+		al.lastAddr, al.lastIdx, al.lastOK = address, len(al.slots), true
 		slotmap := map[common.Hash]struct{}{slot: {}}
 		al.slots = append(al.slots, slotmap)
 		return !addrPresent, true
@@ -158,6 +183,9 @@ func (al *accessList) DeleteSlot(address common.Address, slot common.Hash) {
 	if !addrOk {
 		panic("reverting slot change, address not present in list")
 	}
+	// The memo may name this address or an index this revert is about to drop, so
+	// it goes rather than being repaired.
+	al.lastOK = false
 	slotmap := al.slots[idx]
 	delete(slotmap, slot)
 	// If that was the last (first) slot, remove it
@@ -174,6 +202,7 @@ func (al *accessList) DeleteSlot(address common.Address, slot common.Hash) {
 // This method is meant to be used  by the journal, which maintains ordering of
 // operations.
 func (al *accessList) DeleteAddress(address common.Address) {
+	al.lastOK = false
 	delete(al.addresses, address)
 }
 
