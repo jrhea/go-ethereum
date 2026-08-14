@@ -90,6 +90,14 @@ type StateDB struct {
 	// processing a state transition.
 	stateObjects map[common.Address]*stateObject
 
+	// A frame asks StateDB about the account it is running in over and over, once
+	// per balance, code, code-hash or storage question, and each of those hashes
+	// the same 20 bytes again. lastObj holds the object the previous lookup
+	// resolved so a run of them costs one compare. Only live objects are held, and
+	// every path that drops one from the map above clears it.
+	lastAddr common.Address
+	lastObj  *stateObject
+
 	// This map holds 'deleted' objects. An object with the same address
 	// might also occur in the 'stateObjects' map due to account
 	// resurrection. The account value is tracked as the original value
@@ -605,7 +613,11 @@ func (s *StateDB) getStateObject(addr common.Address) *stateObject {
 		s.stateAccessList.AccountRead(addr)
 	}
 	// Prefer live objects if any is available
+	if s.lastObj != nil && s.lastAddr == addr {
+		return s.lastObj
+	}
 	if obj := s.stateObjects[addr]; obj != nil {
+		s.lastAddr, s.lastObj = addr, obj
 		return obj
 	}
 	// Short circuit if the account is already destructed in this block.
@@ -641,6 +653,7 @@ func (s *StateDB) getStateObject(addr common.Address) *stateObject {
 
 func (s *StateDB) setStateObject(object *stateObject) {
 	s.stateObjects[object.Address()] = object
+	s.lastAddr, s.lastObj = object.Address(), object
 }
 
 // getOrNewStateObject retrieves a state object or create a new state object if nil.
@@ -797,6 +810,7 @@ func (s *StateDB) Finalise(deleteEmptyObjects bool) *bal.ConstructionBlockAccess
 		}
 		if obj.selfDestructed || (deleteEmptyObjects && obj.empty()) {
 			delete(s.stateObjects, obj.address)
+			s.lastObj = nil
 			s.markDelete(addr)
 
 			// We need to maintain account deletions explicitly (will remain
@@ -880,6 +894,7 @@ func (s *StateDB) finaliseAmsterdam(deleteEmptyObjects bool) *bal.ConstructionBl
 				s.markUpdate(addr)
 			} else {
 				delete(s.stateObjects, obj.address)
+				s.lastObj = nil
 				s.markDelete(addr)
 				if _, ok := s.stateObjectsDestruct[obj.address]; !ok {
 					s.stateObjectsDestruct[obj.address] = obj
@@ -889,6 +904,7 @@ func (s *StateDB) finaliseAmsterdam(deleteEmptyObjects bool) *bal.ConstructionBl
 		case deleteEmptyObjects && obj.empty():
 			// EIP-161: a touched, empty account is removed.
 			delete(s.stateObjects, obj.address)
+			s.lastObj = nil
 			s.markDelete(addr)
 			if _, ok := s.stateObjectsDestruct[obj.address]; !ok {
 				s.stateObjectsDestruct[obj.address] = obj

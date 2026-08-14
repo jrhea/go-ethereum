@@ -465,6 +465,7 @@ type (
 
 func (ch createObjectChange) revert(s *StateDB) {
 	delete(s.stateObjects, ch.account)
+	s.lastObj = nil
 }
 
 func (ch createObjectChange) mutation() (common.Address, journalMutationKind, bool) {
