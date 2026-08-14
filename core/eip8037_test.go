@@ -170,17 +170,17 @@ func applyMsg(t *testing.T, sdb *state.StateDB, tx *types.Transaction) (*Executi
 //	scalar:    Used(initial)                             == UsedExecutionGas + UsedStateGas
 func assertBudgetSane(t *testing.T, initial, got vm.GasBudget) {
 	t.Helper()
-	if got.ExecutionGas+got.UsedExecutionGas+got.Spilled != initial.ExecutionGas {
+	if got.ExecutionGas+got.UsedExecutionGas()+got.Spilled != initial.ExecutionGas {
 		t.Fatalf("execution not conserved: R=%d usedR=%d spilled=%d, want sum %d",
-			got.ExecutionGas, got.UsedExecutionGas, got.Spilled, initial.ExecutionGas)
+			got.ExecutionGas, got.UsedExecutionGas(), got.Spilled, initial.ExecutionGas)
 	}
 	if int64(got.StateGas)+got.UsedStateGas != int64(initial.StateGas)+int64(got.Spilled) {
 		t.Fatalf("state not conserved: S=%d usedS=%d spilled=%d, want %d+spilled",
 			got.StateGas, got.UsedStateGas, got.Spilled, initial.StateGas)
 	}
-	if int64(got.Used(initial)) != int64(got.UsedExecutionGas)+got.UsedStateGas {
+	if int64(got.Used(initial)) != int64(got.UsedExecutionGas())+got.UsedStateGas {
 		t.Fatalf("scalar mismatch: used=%d, usedR=%d usedS=%d",
-			got.Used(initial), got.UsedExecutionGas, got.UsedStateGas)
+			got.Used(initial), got.UsedExecutionGas(), got.UsedStateGas)
 	}
 }
 

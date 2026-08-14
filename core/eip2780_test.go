@@ -656,8 +656,8 @@ func TestEIP2780DelegationWarmth(t *testing.T) {
 	st := newStateTransition(amsterdamCoreEVM(sdb), &Message{To: &to, Value: new(uint256.Int)}, NewGasPool(100_000))
 	st.gasRemaining = vm.NewGasBudget(1_000, 0)
 	sdb.AddAddressToAccessList(recipient)
-	if !st.chargeCallRecipientEIP2780(new(uint256.Int)) || st.gasRemaining.UsedExecutionGas != warm {
-		t.Fatalf("recipient target charge = %d, want warm %d", st.gasRemaining.UsedExecutionGas, warm)
+	if !st.chargeCallRecipientEIP2780(new(uint256.Int)) || st.gasRemaining.UsedExecutionGas() != warm {
+		t.Fatalf("recipient target charge = %d, want warm %d", st.gasRemaining.UsedExecutionGas(), warm)
 	}
 }
 

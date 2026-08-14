@@ -59,7 +59,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sp--
 			x := &sd[sp]
@@ -78,7 +77,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 5
-			contract.Gas.UsedExecutionGas += 5
 
 			sp--
 			x := &sd[sp]
@@ -97,7 +95,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sp--
 			x := &sd[sp]
@@ -116,7 +113,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 5
-			contract.Gas.UsedExecutionGas += 5
 
 			sp--
 			x := &sd[sp]
@@ -135,7 +131,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 5
-			contract.Gas.UsedExecutionGas += 5
 
 			sp--
 			x := &sd[sp]
@@ -154,7 +149,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 5
-			contract.Gas.UsedExecutionGas += 5
 
 			sp--
 			x := &sd[sp]
@@ -173,7 +167,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 5
-			contract.Gas.UsedExecutionGas += 5
 
 			sp--
 			x := &sd[sp]
@@ -192,7 +185,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 8
-			contract.Gas.UsedExecutionGas += 8
 
 			sp -= 2
 			x := &sd[sp+1]
@@ -212,7 +204,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 8
-			contract.Gas.UsedExecutionGas += 8
 
 			sp -= 2
 			x := &sd[sp+1]
@@ -232,7 +223,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 5
-			contract.Gas.UsedExecutionGas += 5
 
 			sp--
 			back := &sd[sp]
@@ -251,7 +241,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sp--
 			x := &sd[sp]
@@ -274,7 +263,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sp--
 			x := &sd[sp]
@@ -297,7 +285,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sp--
 			x := &sd[sp]
@@ -320,7 +307,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sp--
 			x := &sd[sp]
@@ -343,7 +329,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sp--
 			x := &sd[sp]
@@ -366,7 +351,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			x := &sd[sp-1]
 			if x.IsZero() {
@@ -387,7 +371,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sp--
 			x := &sd[sp]
@@ -406,7 +389,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sp--
 			x := &sd[sp]
@@ -425,7 +407,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sp--
 			x := &sd[sp]
@@ -444,7 +425,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			x := &sd[sp-1]
 			x.Not(x)
@@ -461,7 +441,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sp--
 			th := &sd[sp]
@@ -481,7 +460,6 @@ mainLoop:
 					break mainLoop
 				}
 				contract.Gas.ExecutionGas -= 3
-				contract.Gas.UsedExecutionGas += 3
 
 				sp--
 				shift := &sd[sp]
@@ -508,7 +486,6 @@ mainLoop:
 					break mainLoop
 				}
 				contract.Gas.ExecutionGas -= 3
-				contract.Gas.UsedExecutionGas += 3
 
 				sp--
 				shift := &sd[sp]
@@ -535,7 +512,6 @@ mainLoop:
 					break mainLoop
 				}
 				contract.Gas.ExecutionGas -= 3
-				contract.Gas.UsedExecutionGas += 3
 
 				sp--
 				shift := &sd[sp]
@@ -569,7 +545,6 @@ mainLoop:
 					break mainLoop
 				}
 				contract.Gas.ExecutionGas -= 5
-				contract.Gas.UsedExecutionGas += 5
 
 				x := &sd[sp-1]
 				x.SetUint64(256 - uint64(x.BitLen()))
@@ -589,7 +564,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 30
-			contract.Gas.UsedExecutionGas += 30
 
 			stack.size = sp
 			stack.inner.top = stack.bottom + sp
@@ -642,7 +616,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 2
-			contract.Gas.UsedExecutionGas += 2
 
 			sp--
 			pc++
@@ -658,7 +631,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			stack.size = sp
 			stack.inner.top = stack.bottom + sp
@@ -711,7 +683,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			stack.size = sp
 			stack.inner.top = stack.bottom + sp
@@ -764,7 +735,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			stack.size = sp
 			stack.inner.top = stack.bottom + sp
@@ -817,7 +787,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 8
-			contract.Gas.UsedExecutionGas += 8
 
 			if evm.abort.Load() {
 				res, err = nil, errStopToken
@@ -843,7 +812,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 10
-			contract.Gas.UsedExecutionGas += 10
 
 			if evm.abort.Load() {
 				res, err = nil, errStopToken
@@ -872,7 +840,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 2
-			contract.Gas.UsedExecutionGas += 2
 
 			elem := &sd[sp]
 			sp++
@@ -890,7 +857,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 2
-			contract.Gas.UsedExecutionGas += 2
 
 			elem := &sd[sp]
 			sp++
@@ -904,7 +870,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 1
-			contract.Gas.UsedExecutionGas += 1
 
 			pc++
 			continue mainLoop
@@ -920,7 +885,6 @@ mainLoop:
 					break mainLoop
 				}
 				contract.Gas.ExecutionGas -= 2
-				contract.Gas.UsedExecutionGas += 2
 
 				elem := &sd[sp]
 				sp++
@@ -941,7 +905,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -977,7 +940,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1015,7 +977,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1062,7 +1023,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1109,7 +1069,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1156,7 +1115,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1203,7 +1161,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1250,7 +1207,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1297,7 +1253,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1344,7 +1299,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1391,7 +1345,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1438,7 +1391,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1485,7 +1437,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1532,7 +1483,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1579,7 +1529,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1626,7 +1575,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1673,7 +1621,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1720,7 +1667,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1767,7 +1713,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1814,7 +1759,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1861,7 +1805,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1908,7 +1851,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -1955,7 +1897,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -2002,7 +1943,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -2049,7 +1989,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -2096,7 +2035,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -2143,7 +2081,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -2190,7 +2127,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -2237,7 +2173,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -2284,7 +2219,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -2331,7 +2265,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -2378,7 +2311,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			if isEIP4762 {
 				stack.size = sp
@@ -2428,7 +2360,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp] = sd[sp-1]
 			sp++
@@ -2448,7 +2379,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp] = sd[sp-2]
 			sp++
@@ -2468,7 +2398,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp] = sd[sp-3]
 			sp++
@@ -2488,7 +2417,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp] = sd[sp-4]
 			sp++
@@ -2508,7 +2436,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp] = sd[sp-5]
 			sp++
@@ -2528,7 +2455,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp] = sd[sp-6]
 			sp++
@@ -2548,7 +2474,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp] = sd[sp-7]
 			sp++
@@ -2568,7 +2493,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp] = sd[sp-8]
 			sp++
@@ -2588,7 +2512,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp] = sd[sp-9]
 			sp++
@@ -2608,7 +2531,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp] = sd[sp-10]
 			sp++
@@ -2628,7 +2550,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp] = sd[sp-11]
 			sp++
@@ -2648,7 +2569,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp] = sd[sp-12]
 			sp++
@@ -2668,7 +2588,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp] = sd[sp-13]
 			sp++
@@ -2688,7 +2607,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp] = sd[sp-14]
 			sp++
@@ -2708,7 +2626,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp] = sd[sp-15]
 			sp++
@@ -2728,7 +2645,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp] = sd[sp-16]
 			sp++
@@ -2745,7 +2661,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp-2], sd[sp-1] = sd[sp-1], sd[sp-2]
 			pc++
@@ -2761,7 +2676,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp-3], sd[sp-1] = sd[sp-1], sd[sp-3]
 			pc++
@@ -2777,7 +2691,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp-4], sd[sp-1] = sd[sp-1], sd[sp-4]
 			pc++
@@ -2793,7 +2706,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp-5], sd[sp-1] = sd[sp-1], sd[sp-5]
 			pc++
@@ -2809,7 +2721,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp-6], sd[sp-1] = sd[sp-1], sd[sp-6]
 			pc++
@@ -2825,7 +2736,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp-7], sd[sp-1] = sd[sp-1], sd[sp-7]
 			pc++
@@ -2841,7 +2751,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp-8], sd[sp-1] = sd[sp-1], sd[sp-8]
 			pc++
@@ -2857,7 +2766,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp-9], sd[sp-1] = sd[sp-1], sd[sp-9]
 			pc++
@@ -2873,7 +2781,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp-10], sd[sp-1] = sd[sp-1], sd[sp-10]
 			pc++
@@ -2889,7 +2796,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp-11], sd[sp-1] = sd[sp-1], sd[sp-11]
 			pc++
@@ -2905,7 +2811,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp-12], sd[sp-1] = sd[sp-1], sd[sp-12]
 			pc++
@@ -2921,7 +2826,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp-13], sd[sp-1] = sd[sp-1], sd[sp-13]
 			pc++
@@ -2937,7 +2841,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp-14], sd[sp-1] = sd[sp-1], sd[sp-14]
 			pc++
@@ -2953,7 +2856,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp-15], sd[sp-1] = sd[sp-1], sd[sp-15]
 			pc++
@@ -2969,7 +2871,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp-16], sd[sp-1] = sd[sp-1], sd[sp-16]
 			pc++
@@ -2985,7 +2886,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= 3
-			contract.Gas.UsedExecutionGas += 3
 
 			sd[sp-17], sd[sp-1] = sd[sp-1], sd[sp-17]
 			pc++
@@ -3005,7 +2905,6 @@ mainLoop:
 				break mainLoop
 			}
 			contract.Gas.ExecutionGas -= operation.constantGas
-			contract.Gas.UsedExecutionGas += operation.constantGas
 
 			stack.size = sp
 			stack.inner.top = stack.bottom + sp

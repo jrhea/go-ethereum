@@ -432,11 +432,6 @@ func makeCallVariantGasCallEIP7702(intrinsicFunc intrinsicGasFunc, coldCost uint
 		// tracers.
 		contract.Gas.ExecutionGas += eip2929Cost + eip7702Cost + intrinsicCost
 
-		// Undo the ExecutionGasUsed increments from the direct UseGas charges,
-		// since this gas will be re-charged via the returned cost.
-		contract.Gas.UsedExecutionGas -= eip2929Cost
-		contract.Gas.UsedExecutionGas -= eip7702Cost
-		contract.Gas.UsedExecutionGas -= intrinsicCost
 
 		// Aggregate the gas costs from all components, including EIP-2929, EIP-7702,
 		// the CALL opcode itself, and the cost incurred by nested calls.
@@ -527,7 +522,6 @@ func makeCallVariantGasCallEIP8037(executionFunc executionGasFunc, stateGasFunc 
 		// Temporarily undo direct execution charges for tracer reporting.
 		// The interpreter will charge the returned totalCost.
 		contract.Gas.ExecutionGas += eip2929Cost + eip7702Cost + executionCost
-		contract.Gas.UsedExecutionGas -= eip2929Cost + eip7702Cost + executionCost
 
 		// Aggregate total cost.
 		var (

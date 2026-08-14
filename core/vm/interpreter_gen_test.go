@@ -215,7 +215,7 @@ type diffResult struct {
 // dimension moved rather than just showing one number.
 func gasSummary(g GasBudget) string {
 	return fmt.Sprintf("gas(regular=%d state=%d usedRegular=%d usedState=%d spilled=%d)",
-		g.ExecutionGas, g.StateGas, g.UsedExecutionGas, g.UsedStateGas, g.Spilled)
+		g.ExecutionGas, g.StateGas, g.UsedExecutionGas(), g.UsedStateGas, g.Spilled)
 }
 
 func (r diffResult) equal(o diffResult) (string, bool) {
@@ -228,7 +228,7 @@ func (r diffResult) equal(o diffResult) (string, bool) {
 	if r.gas.StateGas != o.gas.StateGas {
 		return "state gas left", false
 	}
-	if r.gas.UsedExecutionGas != o.gas.UsedExecutionGas {
+	if r.gas.UsedExecutionGas() != o.gas.UsedExecutionGas() {
 		return "execution gas used", false
 	}
 	if r.gas.UsedStateGas != o.gas.UsedStateGas {

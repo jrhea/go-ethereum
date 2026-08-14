@@ -45,14 +45,21 @@ func (g GasCosts) String() string {
 //
 //   - ExecutionGas / StateGas: the running balance during execution, or the
 //     leftover balance the caller must absorb after a sub-call.
-//   - UsedExecutionGas / UsedStateGas: per-frame accumulators tracking gross
-//     consumption. UsedStateGas is signed so it can be decremented by inline
+//   - InitialExecutionGas / UsedStateGas: the frame's starting execution balance,
+//     from which gross execution consumption is derived, and the state-gas
+//     accumulator. UsedStateGas is signed so it can be decremented by inline
 //     state-gas refunds (e.g., SSTORE 0->A->0).
 type GasBudget struct {
-	ExecutionGas     uint64 // remaining execution-gas balance (or leftover for caller to absorb)
-	StateGas         uint64 // remaining state-gas reservoir (or leftover for caller to absorb)
-	UsedExecutionGas uint64 // gross execution gas consumed in this frame
-	UsedStateGas     int64  // signed net state-gas consumed in this frame
+	ExecutionGas uint64 // remaining execution-gas balance (or leftover for caller to absorb)
+	StateGas     uint64 // remaining state-gas reservoir (or leftover for caller to absorb)
+
+	// InitialExecutionGas is the execution gas this frame started with. Every
+	// path that moves ExecutionGas moves Spilled or this by the same amount, so
+	// gross consumption is InitialExecutionGas-ExecutionGas-Spilled and does not
+	// need an accumulator of its own. That matters because the accumulator was
+	// a second read-modify-write on every single opcode.
+	InitialExecutionGas uint64
+	UsedStateGas        int64 // signed net state-gas consumed in this frame
 
 	// Spilled tracks how much of this frame's execution gas (gas_left)
 	// has been borrowed to cover state-gas charges that exceeded the
@@ -63,7 +70,12 @@ type GasBudget struct {
 // NewGasBudget initializes a fresh GasBudget for execution / forwarding,
 // with both usage accumulators set to zero.
 func NewGasBudget(execution, state uint64) GasBudget {
-	return GasBudget{ExecutionGas: execution, StateGas: state}
+	return GasBudget{ExecutionGas: execution, StateGas: state, InitialExecutionGas: execution}
+}
+
+// UsedExecutionGas returns the gross execution gas consumed in this frame.
+func (g GasBudget) UsedExecutionGas() uint64 {
+	return g.InitialExecutionGas - g.ExecutionGas - g.Spilled
 }
 
 // Used returns the total scalar gas consumed relative to an initial budget.
@@ -73,7 +85,7 @@ func (g GasBudget) Used(initial GasBudget) uint64 {
 
 // String returns a visual representation of the budget.
 func (g GasBudget) String() string {
-	return fmt.Sprintf("<%v,%v,used=<%v,%v>,borrowed=%v>", g.ExecutionGas, g.StateGas, g.UsedExecutionGas, g.UsedStateGas, g.Spilled)
+	return fmt.Sprintf("<%v,%v,used=<%v,%v>,borrowed=%v>", g.ExecutionGas, g.StateGas, g.UsedExecutionGas(), g.UsedStateGas, g.Spilled)
 }
 
 // Charge deducts a combined execution+state cost from the running balance and
@@ -91,7 +103,6 @@ func (g *GasBudget) ChargeExecutionOnly(r uint64) error {
 		return ErrOutOfGas
 	}
 	g.ExecutionGas -= r
-	g.UsedExecutionGas += r
 	return nil
 }
 
@@ -130,7 +141,6 @@ func (g *GasBudget) charge(cost GasCosts) bool {
 	}
 	g.ExecutionGas = execution
 	g.StateGas = state
-	g.UsedExecutionGas += cost.ExecutionGas
 	g.UsedStateGas += int64(cost.StateGas)
 	g.Spilled = spilled
 	return true
@@ -167,7 +177,6 @@ func (g *GasBudget) RefundState(s uint64) {
 
 // DrainExecution burns the remaining execution-gas.
 func (g *GasBudget) DrainExecution() {
-	g.UsedExecutionGas += g.ExecutionGas
 	g.ExecutionGas = 0
 }
 
@@ -177,11 +186,11 @@ func (g *GasBudget) DrainExecution() {
 // that the absorb-on-return path correctly reclaims the unused portion.
 func (g *GasBudget) Forward(execution uint64) GasBudget {
 	g.ExecutionGas -= execution
-	g.UsedExecutionGas += execution
 
 	child := GasBudget{
-		ExecutionGas: execution,
-		StateGas:     g.StateGas,
+		ExecutionGas:        execution,
+		StateGas:            g.StateGas,
+		InitialExecutionGas: execution,
 	}
 	g.StateGas = 0
 	return child
@@ -218,11 +227,11 @@ func (g GasBudget) ExitRevert() GasBudget {
 		log.Warn("Negative reservoir at revert", "remaining", g.StateGas, "used", g.UsedStateGas, "borrowed", g.Spilled)
 	}
 	return GasBudget{
-		ExecutionGas:     g.ExecutionGas + g.Spilled,
-		StateGas:         uint64(reservoir),
-		UsedExecutionGas: g.UsedExecutionGas,
-		UsedStateGas:     0,
-		Spilled:          0,
+		ExecutionGas:        g.ExecutionGas + g.Spilled,
+		StateGas:            uint64(reservoir),
+		InitialExecutionGas: g.InitialExecutionGas,
+		UsedStateGas:        0,
+		Spilled:             0,
 	}
 }
 
@@ -241,11 +250,11 @@ func (g GasBudget) ExitHalt() GasBudget {
 		log.Warn("Negative reservoir at halt", "remaining", g.StateGas, "used", g.UsedStateGas, "borrowed", g.Spilled)
 	}
 	return GasBudget{
-		ExecutionGas:     0,
-		StateGas:         uint64(reservoir),
-		UsedExecutionGas: g.UsedExecutionGas + g.ExecutionGas + g.Spilled,
-		UsedStateGas:     0,
-		Spilled:          0,
+		ExecutionGas:        0,
+		StateGas:            uint64(reservoir),
+		InitialExecutionGas: g.InitialExecutionGas,
+		UsedStateGas:        0,
+		Spilled:             0,
 	}
 }
 
@@ -271,11 +280,9 @@ func (g GasBudget) Exit(err error) GasBudget {
 // state-gas that spilled into the execution pool inside the child frame is
 // excluded from the UsedExecutionGas.
 func (g *GasBudget) Absorb(child GasBudget) {
-	g.UsedExecutionGas -= child.ExecutionGas
 	g.ExecutionGas += child.ExecutionGas
 	g.StateGas = child.StateGas
 	g.UsedStateGas += child.UsedStateGas
 
-	g.UsedExecutionGas -= child.Spilled
 	g.Spilled += child.Spilled
 }
