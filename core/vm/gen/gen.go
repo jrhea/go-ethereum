@@ -203,6 +203,7 @@ func (g *generator) emitInlineOp(code byte) {
 	switch factory := factoryName(spec.execFn); factory {
 	case "makePush": // PUSH3-PUSH32: splice makePush(size, size)
 		n := int(code) - 0x5f
+		g.emitPushWholeImmediate(n)
 		g.p("%s", g.spliceOpcodeFactoryBody("makePush", n, n))
 	case "makeDup": // DUP1-DUP16: splice makeDup(n)
 		g.p("%s", g.spliceOpcodeFactoryBody("makeDup", int(code)-0x7f))
@@ -218,6 +219,24 @@ func (g *generator) emitInlineOp(code byte) {
 		g.p("}\n")
 		g.emitUndefinedFallback()
 	}
+}
+
+// emitPushWholeImmediate emits a fast path for the case where the push data lies
+// wholly inside the code, which holds for every PUSH except one running off the end
+// of a contract. It matters because makePush hands a slice of run-time length to
+// SetBytes, which switches on that length across 33 cases and is far too big to
+// inline, while the width is a constant at each emission site here. Falling through
+// leaves the spliced body to handle the truncated tail, so the ragged case keeps its
+// one definition.
+func (g *generator) emitPushWholeImmediate(n int) {
+	g.p("if p := int(pc + 1); p+%d <= len(contract.Code) {\n", n)
+	g.p("a := &sd[sp]\n")
+	g.p("sp++\n")
+	g.p("a.SetBytes%d(contract.Code[p : p+%d])\n", n, n)
+	g.p("pc += %d\n", n)
+	g.p("pc++\n")
+	g.p("continue mainLoop\n")
+	g.p("}\n")
 }
 
 // emitDirectOp emits the default case's steps with two shortcuts: the handler, gas

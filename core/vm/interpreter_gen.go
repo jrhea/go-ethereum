@@ -1029,6 +1029,14 @@ mainLoop:
 				pc++
 				continue mainLoop
 			}
+			if p := int(pc + 1); p+3 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes3(contract.Code[p : p+3])
+				pc += 3
+				pc++
+				continue mainLoop
+			}
 			var (
 				codeLen = len(contract.Code)
 				start   = min(codeLen, int(pc+1))
@@ -1065,6 +1073,14 @@ mainLoop:
 				if err != nil {
 					break mainLoop
 				}
+				pc++
+				continue mainLoop
+			}
+			if p := int(pc + 1); p+4 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes4(contract.Code[p : p+4])
+				pc += 4
 				pc++
 				continue mainLoop
 			}
@@ -1107,6 +1123,14 @@ mainLoop:
 				pc++
 				continue mainLoop
 			}
+			if p := int(pc + 1); p+5 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes5(contract.Code[p : p+5])
+				pc += 5
+				pc++
+				continue mainLoop
+			}
 			var (
 				codeLen = len(contract.Code)
 				start   = min(codeLen, int(pc+1))
@@ -1143,6 +1167,14 @@ mainLoop:
 				if err != nil {
 					break mainLoop
 				}
+				pc++
+				continue mainLoop
+			}
+			if p := int(pc + 1); p+6 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes6(contract.Code[p : p+6])
+				pc += 6
 				pc++
 				continue mainLoop
 			}
@@ -1185,6 +1217,14 @@ mainLoop:
 				pc++
 				continue mainLoop
 			}
+			if p := int(pc + 1); p+7 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes7(contract.Code[p : p+7])
+				pc += 7
+				pc++
+				continue mainLoop
+			}
 			var (
 				codeLen = len(contract.Code)
 				start   = min(codeLen, int(pc+1))
@@ -1221,6 +1261,14 @@ mainLoop:
 				if err != nil {
 					break mainLoop
 				}
+				pc++
+				continue mainLoop
+			}
+			if p := int(pc + 1); p+8 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes8(contract.Code[p : p+8])
+				pc += 8
 				pc++
 				continue mainLoop
 			}
@@ -1263,6 +1311,14 @@ mainLoop:
 				pc++
 				continue mainLoop
 			}
+			if p := int(pc + 1); p+9 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes9(contract.Code[p : p+9])
+				pc += 9
+				pc++
+				continue mainLoop
+			}
 			var (
 				codeLen = len(contract.Code)
 				start   = min(codeLen, int(pc+1))
@@ -1299,6 +1355,14 @@ mainLoop:
 				if err != nil {
 					break mainLoop
 				}
+				pc++
+				continue mainLoop
+			}
+			if p := int(pc + 1); p+10 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes10(contract.Code[p : p+10])
+				pc += 10
 				pc++
 				continue mainLoop
 			}
@@ -1341,6 +1405,14 @@ mainLoop:
 				pc++
 				continue mainLoop
 			}
+			if p := int(pc + 1); p+11 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes11(contract.Code[p : p+11])
+				pc += 11
+				pc++
+				continue mainLoop
+			}
 			var (
 				codeLen = len(contract.Code)
 				start   = min(codeLen, int(pc+1))
@@ -1377,6 +1449,14 @@ mainLoop:
 				if err != nil {
 					break mainLoop
 				}
+				pc++
+				continue mainLoop
+			}
+			if p := int(pc + 1); p+12 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes12(contract.Code[p : p+12])
+				pc += 12
 				pc++
 				continue mainLoop
 			}
@@ -1419,6 +1499,14 @@ mainLoop:
 				pc++
 				continue mainLoop
 			}
+			if p := int(pc + 1); p+13 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes13(contract.Code[p : p+13])
+				pc += 13
+				pc++
+				continue mainLoop
+			}
 			var (
 				codeLen = len(contract.Code)
 				start   = min(codeLen, int(pc+1))
@@ -1455,6 +1543,14 @@ mainLoop:
 				if err != nil {
 					break mainLoop
 				}
+				pc++
+				continue mainLoop
+			}
+			if p := int(pc + 1); p+14 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes14(contract.Code[p : p+14])
+				pc += 14
 				pc++
 				continue mainLoop
 			}
@@ -1497,6 +1593,14 @@ mainLoop:
 				pc++
 				continue mainLoop
 			}
+			if p := int(pc + 1); p+15 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes15(contract.Code[p : p+15])
+				pc += 15
+				pc++
+				continue mainLoop
+			}
 			var (
 				codeLen = len(contract.Code)
 				start   = min(codeLen, int(pc+1))
@@ -1533,6 +1637,14 @@ mainLoop:
 				if err != nil {
 					break mainLoop
 				}
+				pc++
+				continue mainLoop
+			}
+			if p := int(pc + 1); p+16 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes16(contract.Code[p : p+16])
+				pc += 16
 				pc++
 				continue mainLoop
 			}
@@ -1575,6 +1687,14 @@ mainLoop:
 				pc++
 				continue mainLoop
 			}
+			if p := int(pc + 1); p+17 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes17(contract.Code[p : p+17])
+				pc += 17
+				pc++
+				continue mainLoop
+			}
 			var (
 				codeLen = len(contract.Code)
 				start   = min(codeLen, int(pc+1))
@@ -1611,6 +1731,14 @@ mainLoop:
 				if err != nil {
 					break mainLoop
 				}
+				pc++
+				continue mainLoop
+			}
+			if p := int(pc + 1); p+18 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes18(contract.Code[p : p+18])
+				pc += 18
 				pc++
 				continue mainLoop
 			}
@@ -1653,6 +1781,14 @@ mainLoop:
 				pc++
 				continue mainLoop
 			}
+			if p := int(pc + 1); p+19 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes19(contract.Code[p : p+19])
+				pc += 19
+				pc++
+				continue mainLoop
+			}
 			var (
 				codeLen = len(contract.Code)
 				start   = min(codeLen, int(pc+1))
@@ -1689,6 +1825,14 @@ mainLoop:
 				if err != nil {
 					break mainLoop
 				}
+				pc++
+				continue mainLoop
+			}
+			if p := int(pc + 1); p+20 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes20(contract.Code[p : p+20])
+				pc += 20
 				pc++
 				continue mainLoop
 			}
@@ -1731,6 +1875,14 @@ mainLoop:
 				pc++
 				continue mainLoop
 			}
+			if p := int(pc + 1); p+21 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes21(contract.Code[p : p+21])
+				pc += 21
+				pc++
+				continue mainLoop
+			}
 			var (
 				codeLen = len(contract.Code)
 				start   = min(codeLen, int(pc+1))
@@ -1767,6 +1919,14 @@ mainLoop:
 				if err != nil {
 					break mainLoop
 				}
+				pc++
+				continue mainLoop
+			}
+			if p := int(pc + 1); p+22 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes22(contract.Code[p : p+22])
+				pc += 22
 				pc++
 				continue mainLoop
 			}
@@ -1809,6 +1969,14 @@ mainLoop:
 				pc++
 				continue mainLoop
 			}
+			if p := int(pc + 1); p+23 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes23(contract.Code[p : p+23])
+				pc += 23
+				pc++
+				continue mainLoop
+			}
 			var (
 				codeLen = len(contract.Code)
 				start   = min(codeLen, int(pc+1))
@@ -1845,6 +2013,14 @@ mainLoop:
 				if err != nil {
 					break mainLoop
 				}
+				pc++
+				continue mainLoop
+			}
+			if p := int(pc + 1); p+24 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes24(contract.Code[p : p+24])
+				pc += 24
 				pc++
 				continue mainLoop
 			}
@@ -1887,6 +2063,14 @@ mainLoop:
 				pc++
 				continue mainLoop
 			}
+			if p := int(pc + 1); p+25 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes25(contract.Code[p : p+25])
+				pc += 25
+				pc++
+				continue mainLoop
+			}
 			var (
 				codeLen = len(contract.Code)
 				start   = min(codeLen, int(pc+1))
@@ -1923,6 +2107,14 @@ mainLoop:
 				if err != nil {
 					break mainLoop
 				}
+				pc++
+				continue mainLoop
+			}
+			if p := int(pc + 1); p+26 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes26(contract.Code[p : p+26])
+				pc += 26
 				pc++
 				continue mainLoop
 			}
@@ -1965,6 +2157,14 @@ mainLoop:
 				pc++
 				continue mainLoop
 			}
+			if p := int(pc + 1); p+27 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes27(contract.Code[p : p+27])
+				pc += 27
+				pc++
+				continue mainLoop
+			}
 			var (
 				codeLen = len(contract.Code)
 				start   = min(codeLen, int(pc+1))
@@ -2001,6 +2201,14 @@ mainLoop:
 				if err != nil {
 					break mainLoop
 				}
+				pc++
+				continue mainLoop
+			}
+			if p := int(pc + 1); p+28 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes28(contract.Code[p : p+28])
+				pc += 28
 				pc++
 				continue mainLoop
 			}
@@ -2043,6 +2251,14 @@ mainLoop:
 				pc++
 				continue mainLoop
 			}
+			if p := int(pc + 1); p+29 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes29(contract.Code[p : p+29])
+				pc += 29
+				pc++
+				continue mainLoop
+			}
 			var (
 				codeLen = len(contract.Code)
 				start   = min(codeLen, int(pc+1))
@@ -2079,6 +2295,14 @@ mainLoop:
 				if err != nil {
 					break mainLoop
 				}
+				pc++
+				continue mainLoop
+			}
+			if p := int(pc + 1); p+30 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes30(contract.Code[p : p+30])
+				pc += 30
 				pc++
 				continue mainLoop
 			}
@@ -2121,6 +2345,14 @@ mainLoop:
 				pc++
 				continue mainLoop
 			}
+			if p := int(pc + 1); p+31 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes31(contract.Code[p : p+31])
+				pc += 31
+				pc++
+				continue mainLoop
+			}
 			var (
 				codeLen = len(contract.Code)
 				start   = min(codeLen, int(pc+1))
@@ -2157,6 +2389,14 @@ mainLoop:
 				if err != nil {
 					break mainLoop
 				}
+				pc++
+				continue mainLoop
+			}
+			if p := int(pc + 1); p+32 <= len(contract.Code) {
+				a := &sd[sp]
+				sp++
+				a.SetBytes32(contract.Code[p : p+32])
+				pc += 32
 				pc++
 				continue mainLoop
 			}
