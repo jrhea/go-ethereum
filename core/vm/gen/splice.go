@@ -383,8 +383,9 @@ func (g *generator) rewriteStepReturns(src, target string) string {
 func (g *generator) renderBody(stmts []ast.Stmt) string {
 	var out strings.Builder
 	for _, stmt := range stmts {
-		if call, ok := g.matchStackCall(stmt); ok {
-			out.WriteString(g.expandStackMethod(call))
+		if _, ok := g.matchStackCall(stmt); ok {
+			// Stack locals are disabled, so leave the call alone.
+			out.WriteString(g.renderAst([]ast.Stmt{stmt}))
 			continue
 		}
 		// Any other route to the stack, such as a call nested in a larger

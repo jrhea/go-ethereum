@@ -50,25 +50,25 @@ func (g *generator) emitStackChecks(minExpr, maxExpr any, under, over bool) {
 	switch {
 	case under && over: // the table path, which knows neither bound statically
 		g.p(`
-			if sp < %v {
-				res, err = nil, &ErrStackUnderflow{stackLen: sp, required: %v}
+			if stack.len() < %v {
+				res, err = nil, &ErrStackUnderflow{stackLen: stack.len(), required: %v}
 				break mainLoop
-			} else if sp > %v {
-				res, err = nil, &ErrStackOverflow{stackLen: sp, limit: %v}
+			} else if stack.len() > %v {
+				res, err = nil, &ErrStackOverflow{stackLen: stack.len(), limit: %v}
 				break mainLoop
 			}
 		`, minExpr, minExpr, maxExpr, maxExpr)
 	case under:
 		g.p(`
-			if sp < %v {
-				res, err = nil, &ErrStackUnderflow{stackLen: sp, required: %v}
+			if stack.len() < %v {
+				res, err = nil, &ErrStackUnderflow{stackLen: stack.len(), required: %v}
 				break mainLoop
 			}
 		`, minExpr, minExpr)
 	case over:
 		g.p(`
-			if sp > %v {
-				res, err = nil, &ErrStackOverflow{stackLen: sp, limit: %v}
+			if stack.len() > %v {
+				res, err = nil, &ErrStackOverflow{stackLen: stack.len(), limit: %v}
 				break mainLoop
 			}
 		`, maxExpr, maxExpr)
@@ -113,19 +113,13 @@ func (g *generator) emitStaticGas(amount any) {
 // the stack through it: a memory-size function, a dynamic-gas function, or an opcode
 // handler. emitReloadStackView is its other half.
 func (g *generator) emitSyncStackView() {
-	g.p(`
-		stack.size = sp
-		stack.inner.top = stack.bottom + sp
-	`)
+	// no stack locals to publish
 }
 
 // emitReloadStackView reloads sp and sd after a call that may have pushed,
 // popped, or grown the arena underneath them.
 func (g *generator) emitReloadStackView() {
-	g.p(`
-		sp = stack.size
-		sd = stack.inner.data[stack.bottom:]
-	`)
+	// no stack locals to reload
 }
 
 // emitResizeMemory grows memory to the size the gas step charged for.
@@ -333,12 +327,6 @@ func (g *generator) createFile() {
 			// Which of these the switch uses depends on the tier assignments, so
 			// keep them all live rather than tracking usage while emitting.
 			_, _, _, _ = mem, rules, isEIP4762, table
-			// sp and sd shadow stack.size and the stack's window of the arena
-			// as loop locals, so hot opcodes work on registers instead of the
-			// view. They are written back before any call that can see the
-			// stack and reloaded after any call that can move it.
-			sp := stack.size
-			sd := stack.inner.data[stack.bottom:]
 		mainLoop:
 			for {
 	`)
@@ -369,8 +357,6 @@ func (g *generator) createFile() {
 	g.p(`
 				}
 			}
-			stack.size = sp
-			stack.inner.top = stack.bottom + sp
 			if err == errStopToken {
 				err = nil
 			}
