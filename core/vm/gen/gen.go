@@ -42,18 +42,32 @@ import (
 
 // Names the generator needs in more than one place: the file it writes, the
 // dispatch inside it, and the profile that gets that dispatch's calls inlined.
+// calleeFile is cosmetic, the profile only matches on names and line offsets.
 const (
 	generatedFile = "interpreter_gen.go"
-	handlerFile   = "instructions.go"
+	calleeFile    = "instructions.go"
 	dispatchFunc  = "execUntraced"
 	dispatchName  = "(*EVM)." + dispatchFunc
 	vmPkgPath     = "github.com/ethereum/go-ethereum/core/vm"
 	pgoFile       = "cmd/geth/default.pgo"
+
+	// The two shared helpers a dynamic case calls with a gas function bound into
+	// it. Both have to be inlined for that binding to pay off, so the generator
+	// asks the profile for them by name.
+	memSizeHelper = "alignMemorySize"
+	chargeHelper  = "chargeGasCost"
 )
 
 type generator struct {
 	specs [256]opSpec
 	buf   *bytes.Buffer
+
+	// Every function the dispatch calls by name and wants the compiler to inline,
+	// keyed by the identifier as emitted and valued by the name the compiler knows
+	// it as. Recorded while emitting, so the profile asks for exactly what was
+	// written rather than inferring it from the shape of the names, and a call
+	// added later is covered by recording it here. See pgo.go.
+	wantInline map[string]string
 }
 
 // p is the writer of the generated file. Every line of output is appended
@@ -101,6 +115,20 @@ func (g *generator) emitStackChecks(minExpr, maxExpr any, under, over bool) {
 	}
 }
 
+// wantInlined records that the dispatch calls fn by name and needs it inlined, and
+// returns fn so it can be used in the emit call that writes it. asName is how the
+// compiler spells the callee, which for a method includes its receiver.
+func (g *generator) wantInlined(fn, asName string) string {
+	if fn == "" {
+		abortf("the generator asked for a call with no name to be inlined")
+	}
+	if g.wantInline == nil {
+		g.wantInline = make(map[string]string)
+	}
+	g.wantInline[fn] = asName
+	return fn
+}
+
 // emitStaticGas charges amount through ChargeExecutionOnly. amount is a constant in
 // an opcode's own case, operation.constantGas in the table path. The method is small
 // enough that the compiler inlines it without help.
@@ -113,21 +141,42 @@ func (g *generator) emitStaticGas(amount any) {
 	`, amount)
 }
 
-// emitDynamicGas emits the memory sizing and dynamic gas charge through the shared
-// meterDynamicGas, then grows memory to what it charged for. It needs the opcode's
-// operation, so the case pays one table load even though it calls its handler by
-// name.
-func (g *generator) emitDynamicGas() {
+// emitDynamicGas emits the memory sizing and dynamic gas charge for an opcode that
+// knows both of its own gas functions, then grows memory to what it charged for.
+//
+// The functions are named rather than read off table[op], which is what
+// meterDynamicGas does for the ops that vary by fork. That drops the table load and
+// meterDynamicGas's two nil checks, and it turns two calls through a function
+// pointer into direct calls the profile can then have inlined.
+//
+// Both are called for their result, which the shared helper takes instead of the
+// function. Passing the function and letting the helper call it leaves the call
+// indirect: the compiler inlines the helper but does not propagate the bound
+// argument into it.
+//
+// A nil memory sizer means the opcode charges dynamic gas without growing memory,
+// so the size stays zero.
+func (g *generator) emitDynamicGas(spec opSpec) {
+	if spec.memFn == "" {
+		g.p("var memorySize uint64\n")
+	} else {
+		g.p(`
+			memorySize, gerr := %s(%s(stack))
+			if gerr != nil {
+				res, err = nil, gerr
+				break mainLoop
+			}
+		`, g.wantInlined(memSizeHelper, memSizeHelper), g.wantInlined(spec.memFn, spec.memFn))
+	}
 	g.p(`
-		operation := table[op]
-		var memorySize uint64
-		if memorySize, _, err = contract.meterDynamicGas(operation, evm, stack, mem); err != nil {
-			return nil, err
+		if gerr := contract.%s(%s(evm, contract, stack, mem, memorySize)); gerr != nil {
+			res, err = nil, gerr
+			break mainLoop
 		}
 		if memorySize > 0 {
 			mem.Resize(memorySize)
 		}
-	`)
+	`, g.wantInlined(chargeHelper, "(*Contract)."+chargeHelper), g.wantInlined(spec.dynFn, spec.dynFn))
 }
 
 // emitUndefinedFallback emits what a fork-gated opcode does before its fork activates.
@@ -211,7 +260,7 @@ func (g *generator) emitDynamicOp(code byte) {
 	if spec.constGas != 0 {
 		g.emitStaticGas(spec.constGas)
 	}
-	g.emitDynamicGas()
+	g.emitDynamicGas(spec)
 	g.emitCallHandler(g.handlerCall(code), stackStep(spec.stackDelta()))
 }
 
@@ -247,7 +296,7 @@ func (g *generator) handlerCall(code byte) string {
 		abortf("opcode %#x (%s) is built by the closure %q, which has no name to call. Give it a named handler or leave it on the table tier",
 			code, spec.name, spec.execFn)
 	}
-	return spec.execFn + "(&pc, evm, scope)"
+	return g.wantInlined(spec.execFn, spec.execFn) + "(&pc, evm, scope)"
 }
 
 // createFile writes the whole generated file into g.buf, in order: header, imports,
@@ -369,7 +418,7 @@ func vmDir() string {
 // formatted contents of interpreter_gen.go. It is the shared core of the generator:
 // main writes the result to disk, and the up-to-date test in gen_test.go compares it
 // against the committed file.
-func generate() (out []byte, err error) {
+func generate() (g *generator, out []byte, err error) {
 	// Turn a tripped guard into an error. Anything else is a bug in the generator
 	// itself, so let it crash with its stack.
 	defer func() {
@@ -382,7 +431,7 @@ func generate() (out []byte, err error) {
 		}
 	}()
 
-	g := &generator{buf: new(bytes.Buffer)}
+	g = &generator{buf: new(bytes.Buffer)}
 	g.deriveSpecs(genForks())
 	g.createFile()
 
@@ -390,7 +439,7 @@ func generate() (out []byte, err error) {
 	if err != nil {
 		dbg := filepath.Join(vmDir(), "interpreter_gen.go.broken")
 		os.WriteFile(dbg, g.buf.Bytes(), 0644)
-		return nil, fmt.Errorf("gofmt failed (%v); wrote unformatted output to %s", err, dbg)
+		return nil, nil, fmt.Errorf("gofmt failed (%v); wrote unformatted output to %s", err, dbg)
 	}
-	return formatted, nil
+	return g, formatted, nil
 }

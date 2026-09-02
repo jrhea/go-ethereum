@@ -20,7 +20,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"strings"
 
 	"github.com/google/pprof/profile"
 )
@@ -50,14 +49,14 @@ import (
 // matter, only that these edges sit above the profile's hot cutoff.
 const pgoWeight = 1 << 20
 
-// buildProfile returns a profile marking every handler call in the generated
-// dispatch as hot. src is the formatted output, which is parsed rather than
-// tracked while emitting because gofmt can move lines and the offsets have to
-// match the file that ships.
+// buildProfile returns a profile marking as hot every call in the generated
+// dispatch that the generator asked to have inlined. src is the formatted output,
+// which is parsed rather than tracked while emitting because gofmt can move lines
+// and the offsets have to match the file that ships.
 func (g *generator) buildProfile(src []byte) *profile.Profile {
 	startLine, sites := g.callSites(src)
 	if len(sites) == 0 {
-		abortf("no handler calls found in the generated dispatch, so the profile would inline nothing")
+		abortf("none of the calls the generator wants inlined were found in the dispatch, so the profile would inline nothing")
 	}
 
 	p := &profile.Profile{
@@ -91,7 +90,7 @@ func (g *generator) buildProfile(src []byte) *profile.Profile {
 	var first *profile.Location
 	for _, s := range sites {
 		name := vmPkgPath + "." + s.callee
-		callee := &profile.Function{ID: id, Name: name, SystemName: name, Filename: handlerFile, StartLine: 1}
+		callee := &profile.Function{ID: id, Name: name, SystemName: name, Filename: calleeFile, StartLine: 1}
 		id++
 		p.Function = append(p.Function, callee)
 
@@ -126,17 +125,18 @@ func (g *generator) buildProfile(src []byte) *profile.Profile {
 	return p
 }
 
-// handlerSite is one handler call in the dispatch.
-type handlerSite struct {
+// inlineSite is one call in the dispatch that the generator wants inlined.
+type inlineSite struct {
 	callee string
 	line   int
 }
 
 // callSites parses the formatted dispatch and returns the line the dispatch
-// function starts on plus every handler it calls by name. Handlers are called
-// as bare identifiers, so anything selected off a value is a method or a table
-// pointer and is not something the profile can name.
-func (g *generator) callSites(src []byte) (startLine int, sites []handlerSite) {
+// function starts on plus every call the generator recorded through wantInlined,
+// paired with the line it landed on. Anything the generator did not record is
+// left alone: a call through the table has no name to give the profile, and a
+// call the compiler already handles does not need one.
+func (g *generator) callSites(src []byte) (startLine int, sites []inlineSite) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, generatedFile, src, 0)
 	if err != nil {
@@ -153,20 +153,33 @@ func (g *generator) callSites(src []byte) (startLine int, sites []handlerSite) {
 			if !ok {
 				return true
 			}
-			id, ok := call.Fun.(*ast.Ident)
-			if !ok || !strings.HasPrefix(id.Name, "op") {
+			asName, ok := g.wantInline[emittedName(call.Fun)]
+			if !ok {
 				return true
 			}
-			sites = append(sites, handlerSite{callee: id.Name, line: fset.Position(call.Lparen).Line})
+			sites = append(sites, inlineSite{callee: asName, line: fset.Position(call.Lparen).Line})
 			return true
 		})
 	}
 	return startLine, sites
 }
 
+// emittedName returns the identifier a call was written with, which is what
+// wantInlined keyed it by: the bare name for a function, the selected name for a
+// method. Anything else is not a call to a name and matches nothing.
+func emittedName(fun ast.Expr) string {
+	switch f := fun.(type) {
+	case *ast.Ident:
+		return f.Name
+	case *ast.SelectorExpr:
+		return f.Sel.Name
+	}
+	return ""
+}
+
 // profileFor builds the profile for a generated dispatch, turning a tripped
 // guard into an error the way generate does.
-func profileFor(src []byte) (p *profile.Profile, err error) {
+func profileFor(g *generator, src []byte) (p *profile.Profile, err error) {
 	defer func() {
 		switch r := recover().(type) {
 		case nil:
@@ -176,6 +189,5 @@ func profileFor(src []byte) (p *profile.Profile, err error) {
 			panic(r)
 		}
 	}()
-	g := &generator{}
 	return g.buildProfile(src), nil
 }

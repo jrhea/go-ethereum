@@ -259,11 +259,12 @@ func (evm *EVM) execTraced(scope *ScopeContext) (ret []byte, err error) {
 	return res, err
 }
 
-// computeMemorySize runs an operation's memorySize function and word-aligns the
-// result, guarding overflow. The traced loop and the default case call it, and the
-// direct-call ops splice its body with memFn bound to the opcode's own function.
-func computeMemorySize(memFn memorySizeFunc, stack *Stack) (uint64, error) {
-	memSize, overflow := memFn(stack)
+// alignMemorySize word-aligns a memory sizer's result, guarding overflow. It takes
+// the sizer's two return values rather than the sizer itself, so a caller that
+// knows its own sizer can call that directly and still share this. Passing the
+// function instead leaves the call indirect: the compiler inlines the wrapper but
+// does not propagate the bound argument into it.
+func alignMemorySize(memSize uint64, overflow bool) (uint64, error) {
 	if overflow {
 		return 0, ErrGasUintOverflow
 	}
@@ -275,32 +276,58 @@ func computeMemorySize(memFn memorySizeFunc, stack *Stack) (uint64, error) {
 	return size, nil
 }
 
-// chargeDynamicGas runs an operation's dynamicGas function, treats a computation
-// failure as out of gas, and charges the cost. It returns the cost so the traced
-// loop can report it. The traced loop and the default case call it, and the
-// direct-call ops splice its body with dynFn bound to the opcode's own function.
-func (contract *Contract) chargeDynamicGas(dynFn gasFunc, evm *EVM, stack *Stack, mem *Memory, memorySize uint64) (GasCosts, error) {
-	dynamicCost, gerr := dynFn(evm, contract, stack, mem, memorySize)
+// computeMemorySize runs an operation's memorySize function and word-aligns the
+// result. The traced loop and the default case reach their sizer through the table
+// so they come through here; a generated case calls alignMemorySize with its own.
+func computeMemorySize(memFn memorySizeFunc, stack *Stack) (uint64, error) {
+	return alignMemorySize(memFn(stack))
+}
+
+// wrapGasError reports a failure to compute gas as running out of it. Kept out of
+// line because the generated dispatch inlines its caller, and formatting an error
+// is a lot of cold code to carry in the hot loop for a path a valid block never
+// takes.
+//
+//go:noinline
+func wrapGasError(err error) error {
+	return fmt.Errorf("%w: %v", ErrOutOfGas, err)
+}
+
+// chargeGasCost charges what a gas function computed, treating a failure to compute
+// it as running out of gas. Like alignMemorySize it takes the function's two return
+// values rather than the function, so a caller that knows its own gas function can
+// call that directly and still share this.
+func (contract *Contract) chargeGasCost(dynamicCost GasCosts, gerr error) error {
 	if gerr != nil {
-		return dynamicCost, fmt.Errorf("%w: %v", ErrOutOfGas, gerr)
+		return wrapGasError(gerr)
 	}
 	// A execution-only deduction when there is no state gas, otherwise the full
 	// multidimensional charge through the reservoir.
 	if dynamicCost.StateGas == 0 {
 		if cerr := contract.Gas.ChargeExecutionOnly(dynamicCost.ExecutionGas); cerr != nil {
-			return dynamicCost, cerr
+			return cerr
 		}
 	} else if !contract.Gas.charge(dynamicCost) {
-		return dynamicCost, ErrOutOfGas
+		return ErrOutOfGas
 	}
-	return dynamicCost, nil
+	return nil
+}
+
+// chargeDynamicGas runs an operation's dynamicGas function and charges the cost. It
+// returns the cost so the traced loop can report it. The traced loop and the default
+// case reach their gas function through the table so they come through here; a
+// generated case calls chargeGasCost with its own.
+func (contract *Contract) chargeDynamicGas(dynFn gasFunc, evm *EVM, stack *Stack, mem *Memory, memorySize uint64) (GasCosts, error) {
+	dynamicCost, gerr := dynFn(evm, contract, stack, mem, memorySize)
+	return dynamicCost, contract.chargeGasCost(dynamicCost, gerr)
 }
 
 // meterDynamicGas sizes the memory an operation needs and charges its dynamic
 // gas, returning the size to expand to and the charged cost (which the traced
 // loop reports). The caller expands the memory afterward. computeMemorySize and
-// chargeDynamicGas do the work, guarded here for the generic table paths. The
-// direct-call ops splice those two by name and skip the guards.
+// chargeDynamicGas do the work, guarded here for the generic table paths. A
+// generated case knows both functions, so it calls them by name and skips the
+// guards.
 func (contract *Contract) meterDynamicGas(operation *operation, evm *EVM, stack *Stack, mem *Memory) (memorySize uint64, dynamicCost GasCosts, err error) {
 	if operation.dynamicGas != nil {
 		if operation.memorySize != nil {

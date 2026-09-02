@@ -42,7 +42,7 @@ func main() {
 	pgoOut := flag.String("pgo", pgoFile, "where to write the PGO profile, relative to the repo root unless absolute. Empty skips it")
 	flag.Parse()
 
-	formatted, err := generate()
+	g, formatted, err := generate()
 	if err != nil {
 		fatalf("%v", err)
 	}
@@ -58,7 +58,7 @@ func main() {
 	if *pgoOut == "" {
 		return
 	}
-	prof, err := profileFor(formatted)
+	prof, err := profileFor(g, formatted)
 	if err != nil {
 		fatalf("%v", err)
 	}

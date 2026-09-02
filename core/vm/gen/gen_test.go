@@ -32,7 +32,7 @@ import (
 // definitions. It is the CI guard against hand-edits to the generated file and
 // against the generator drifting from the committed output.
 func TestGeneratedDispatchUpToDate(t *testing.T) {
-	got, err := generate()
+	_, got, err := generate()
 	if err != nil {
 		t.Fatalf("running generator: %v", err)
 	}

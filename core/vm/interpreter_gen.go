@@ -377,10 +377,14 @@ mainLoop:
 				res, err = nil, gerr
 				break mainLoop
 			}
-			operation := table[op]
-			var memorySize uint64
-			if memorySize, _, err = contract.meterDynamicGas(operation, evm, stack, mem); err != nil {
-				return nil, err
+			memorySize, gerr := alignMemorySize(memoryKeccak256(stack))
+			if gerr != nil {
+				res, err = nil, gerr
+				break mainLoop
+			}
+			if gerr := contract.chargeGasCost(gasKeccak256(evm, contract, stack, mem, memorySize)); gerr != nil {
+				res, err = nil, gerr
+				break mainLoop
 			}
 			if memorySize > 0 {
 				mem.Resize(memorySize)
@@ -432,10 +436,14 @@ mainLoop:
 				res, err = nil, gerr
 				break mainLoop
 			}
-			operation := table[op]
-			var memorySize uint64
-			if memorySize, _, err = contract.meterDynamicGas(operation, evm, stack, mem); err != nil {
-				return nil, err
+			memorySize, gerr := alignMemorySize(memoryMLoad(stack))
+			if gerr != nil {
+				res, err = nil, gerr
+				break mainLoop
+			}
+			if gerr := contract.chargeGasCost(pureMemoryGascost(evm, contract, stack, mem, memorySize)); gerr != nil {
+				res, err = nil, gerr
+				break mainLoop
 			}
 			if memorySize > 0 {
 				mem.Resize(memorySize)
@@ -455,10 +463,14 @@ mainLoop:
 				res, err = nil, gerr
 				break mainLoop
 			}
-			operation := table[op]
-			var memorySize uint64
-			if memorySize, _, err = contract.meterDynamicGas(operation, evm, stack, mem); err != nil {
-				return nil, err
+			memorySize, gerr := alignMemorySize(memoryMStore(stack))
+			if gerr != nil {
+				res, err = nil, gerr
+				break mainLoop
+			}
+			if gerr := contract.chargeGasCost(pureMemoryGascost(evm, contract, stack, mem, memorySize)); gerr != nil {
+				res, err = nil, gerr
+				break mainLoop
 			}
 			if memorySize > 0 {
 				mem.Resize(memorySize)
