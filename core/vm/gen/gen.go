@@ -24,6 +24,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/ethereum/go-ethereum/params"
 )
 
 // This file holds the shape of the generated dispatch: the emitters for one
@@ -41,6 +43,8 @@ const (
 	dispatchName  = "(*EVM)." + dispatchFunc
 	vmPkgPath     = "github.com/ethereum/go-ethereum/core/vm"
 	pgoFile       = "cmd/geth/default.pgo"
+	stackFile     = "stack.go"
+	stackLocal    = "stack" // the dispatch's stack, which a family's body calls into
 )
 
 type generator struct {
@@ -208,6 +212,37 @@ func (g *generator) emitDynamicOp(code byte) {
 	g.emitAdvance()
 }
 
+// emitFamily emits one parametric case for a run of opcodes that differ only in
+// n. It recovers n from the opcode byte and is otherwise emitStaticOp with the
+// underflow bound written in terms of n and the body written inline, because a
+// family has no single handler name to call.
+//
+// The body assigns nothing to res, where a per-member case set it to nil through
+// its handler's return. That is not a change: every path that leaves the loop
+// assigns res and err in the same statement, so a stale res is never returned.
+func (g *generator) emitFamily(f opFamily) {
+	minOffset, maxStack, gas, delta := g.familyFacts(f)
+
+	names := make([]string, 0, int(f.last-f.base)+1)
+	for code := byte(f.base); code <= byte(f.last); code++ {
+		names = append(names, g.specs[code].Name)
+	}
+	g.p("case %s:\n", strings.Join(names, ", "))
+	g.p("n := int(op-%s) + 1\n", g.specs[byte(f.base)].Name)
+
+	minExpr := "n"
+	if minOffset != 0 {
+		minExpr = fmt.Sprintf("n+%d", minOffset)
+	}
+	g.emitStackChecks(minExpr, maxStack, true, maxStack < int(params.StackLimit))
+	if gas != 0 {
+		g.emitStaticGas(gas)
+	}
+	g.p("%s\n", f.body)
+	g.emitStackStep(delta)
+	g.emitAdvance()
+}
+
 // emitTableOp emits the switch's default case, which walks the table exactly as the
 // legacy loop did. Every fork-varying op lands here, along with the undefined ones,
 // so their volatile logic stays shared rather than restated.
@@ -301,9 +336,18 @@ func (g *generator) createFile() {
 				switch op {
 	`)
 
-	// one case per opcode with its own tier, in opcode order
+	// one case per opcode with its own tier, in opcode order, except that a
+	// family writes one case at its base and its other members write nothing
 	for code := range 256 {
-		switch b := byte(code); g.tierOf(b) {
+		b := byte(code)
+		if f, ok := familyAt(b); ok {
+			g.emitFamily(f)
+			continue
+		}
+		if inFamily(b) {
+			continue
+		}
+		switch g.tierOf(b) {
 		case tierStatic:
 			g.emitStaticOp(b)
 		case tierDynamic:
@@ -387,5 +431,6 @@ func generate() (out []byte, err error) {
 		os.WriteFile(dbg, g.buf.Bytes(), 0644)
 		return nil, fmt.Errorf("gofmt failed (%v); wrote unformatted output to %s", err, dbg)
 	}
+	g.checkLowering(formatted)
 	return formatted, nil
 }

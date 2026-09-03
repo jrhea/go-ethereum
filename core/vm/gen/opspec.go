@@ -78,16 +78,104 @@ var hotOps = []vm.OpCode{
 	vm.PUSH0, vm.PUSH1, vm.PUSH2, vm.PUSH3, vm.PUSH4, vm.PUSH8, vm.PUSH16,
 	vm.PUSH20, vm.PUSH32,
 
-	// DUP and SWAP, as deep as the counts hold up.
-	vm.DUP1, vm.DUP2, vm.DUP3, vm.DUP4, vm.DUP5, vm.DUP6, vm.DUP7,
-	vm.DUP8, vm.DUP9, vm.DUP10, vm.DUP11, vm.DUP12, vm.DUP13, vm.DUP14,
-	vm.SWAP1, vm.SWAP2, vm.SWAP3, vm.SWAP4, vm.SWAP5, vm.SWAP6, vm.SWAP7,
-	vm.SWAP8, vm.SWAP9,
+	// DUP and SWAP in full. These are collapsed into two parametric cases, see
+	// families, but they are listed here like any other fast-path opcode because
+	// that is what this list decides. Once the case is parametric the widths past
+	// DUP14 and SWAP9 cost nothing to include, so the frequency floor that kept
+	// them out no longer applies to them.
+	vm.DUP1, vm.DUP2, vm.DUP3, vm.DUP4, vm.DUP5, vm.DUP6, vm.DUP7, vm.DUP8,
+	vm.DUP9, vm.DUP10, vm.DUP11, vm.DUP12, vm.DUP13, vm.DUP14, vm.DUP15, vm.DUP16,
+	vm.SWAP1, vm.SWAP2, vm.SWAP3, vm.SWAP4, vm.SWAP5, vm.SWAP6, vm.SWAP7, vm.SWAP8,
+	vm.SWAP9, vm.SWAP10, vm.SWAP11, vm.SWAP12, vm.SWAP13, vm.SWAP14, vm.SWAP15, vm.SWAP16,
 
-	// Eight more eligible opcodes measure above the weakest entry here, SWAP9 at
+	// RETURN is here for its opcode number as much as its 0.097% of executions.
+	// The dispatch has to stay under the density bound that decides its lowering,
+	// see lowering.go, and the two ways to do that are not equally good. Folding
+	// cases together buys margin and nothing else. Widening the span buys margin
+	// and coverage together, because the span widens by giving a case to a
+	// high-numbered opcode. At 0xf3 RETURN takes the span from 159 to 243, well
+	// clear of the bound, and pays for itself in executions on the way.
+	vm.RETURN,
+
+	// Seven more eligible opcodes measure above the weakest entry here, SWAP9 at
 	// 0.050% of executions, and are not listed yet: CALLDATASIZE, GAS,
-	// RETURNDATASIZE, CALLER, CALLVALUE, RETURN, CODECOPY and CALLDATACOPY. The
-	// rest fall below it, RETURNDATACOPY and ADDRESS closest at 0.040% and 0.038%.
+	// RETURNDATASIZE, CALLER, CALLVALUE, CODECOPY and CALLDATACOPY. The rest fall
+	// below it, RETURNDATACOPY and ADDRESS closest at 0.040% and 0.038%.
+}
+
+// opFamily is a run of opcodes collapsed into one parametric case instead of
+// taking a case each. Members are mechanically identical modulo one constant,
+// so per-member cases cost bytes in the dispatch and buy nothing over
+// recovering that constant from the opcode byte. n is that constant, 1 for the
+// base member and counting up.
+//
+// A family only changes how its members are emitted. Which opcodes get the
+// fast path at all is still hotOps, and every member has to be listed there,
+// so coverage and emission stay separable.
+type opFamily struct {
+	base vm.OpCode // the member with n == 1
+	last vm.OpCode // the highest member folded into the case
+	body string    // the parametric body, with n in scope
+}
+
+// families are the runs the dispatch collapses. DUP and SWAP are the whole of
+// it: both charge one constant gas, both have an underflow bound that is n plus
+// a fixed offset, and both have a body that is one stack method taking n.
+//
+// PUSH looks like a third and is not. Its widths differ in more than a
+// constant, PUSH1 and PUSH2 have handlers specialised past what a parametric
+// body can express, and folding PUSH3 to PUSH32 measured 0.97% slower on 100
+// mainnet blocks even though it took 1,792 bytes out of the dispatch.
+var families = []opFamily{
+	{base: vm.DUP1, last: vm.DUP16, body: "stack.dup(n)"},
+	{base: vm.SWAP1, last: vm.SWAP16, body: "stack.swap(n)"},
+}
+
+// familyAt returns the family based at an opcode, for the emit loop, which
+// writes a family once at its base and skips the rest of its members.
+func familyAt(code byte) (opFamily, bool) {
+	for _, f := range families {
+		if code == byte(f.base) {
+			return f, true
+		}
+	}
+	return opFamily{}, false
+}
+
+// inFamily reports whether an opcode is folded into some family's case.
+func inFamily(code byte) bool {
+	for _, f := range families {
+		if code >= byte(f.base) && code <= byte(f.last) {
+			return true
+		}
+	}
+	return false
+}
+
+// familyFacts returns what a family's single case emits as constants, after
+// checking every member agrees on them. The underflow bound is the one thing
+// allowed to vary, and minOffset is how far it sits above n: 0 for DUP, whose
+// DUPn needs n items, 1 for SWAP, whose SWAPn needs n+1. Anything else
+// differing across members would make the shared case wrong for some of them,
+// so stop rather than emit it.
+func (g *generator) familyFacts(f opFamily) (minOffset, maxStack int, gas uint64, delta int) {
+	base := g.specs[byte(f.base)]
+	minOffset, maxStack, gas, delta = base.MinStack-1, base.MaxStack, base.ConstantGas, base.stackDelta()
+	for code := byte(f.base); code <= byte(f.last); code++ {
+		spec, n := g.specs[code], int(code-byte(f.base))+1
+		switch {
+		case g.tierOf(code) != tierStatic:
+			abortf("opcode %#x (%s) is in the %s family but is not on the static tier, so the family case cannot emit its gas",
+				code, spec.Name, base.Name)
+		case spec.MinStack != n+minOffset:
+			abortf("opcode %#x (%s) needs %d stack items, but the %s family case would check for %d",
+				code, spec.Name, spec.MinStack, base.Name, n+minOffset)
+		case spec.MaxStack != maxStack || spec.ConstantGas != gas || spec.stackDelta() != delta:
+			abortf("opcode %#x (%s) disagrees with %s on gas, overflow bound or stack delta, so they cannot share a case",
+				code, spec.Name, base.Name)
+		}
+	}
+	return minOffset, maxStack, gas, delta
 }
 
 // tierFor returns the tier an opcode can be dispatched by. tierTable comes back
@@ -177,6 +265,19 @@ func (g *generator) deriveSpecs(forks []vm.GenFork) {
 	}
 
 	g.assignTiers(hotOps, forks)
+
+	// A family folds its members' cases together, it does not add them. One
+	// listed here but not in hotOps would get a case the coverage list never
+	// asked for, so make the two agree rather than let a range quietly widen
+	// the fast path.
+	for _, f := range families {
+		for code := byte(f.base); code <= byte(f.last); code++ {
+			if g.tierOf(code) == tierTable {
+				abortf("opcode %#x (%s) is in the %s family but not in hotOps, so it has no fast path to fold into",
+					code, g.specs[code].Name, g.specs[byte(f.base)].Name)
+			}
+		}
+	}
 }
 
 // assignTiers gives each listed opcode the tier it qualifies for. Everything else
