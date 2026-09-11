@@ -116,3 +116,30 @@ func codeBitmapInternal(code, bits BitVec) BitVec {
 	}
 	return bits
 }
+
+// CodeAnalysis is what the JUMPDEST cache holds per code: a shadow copy of the
+// code with fused opcodes written over the sequences they stand for (see
+// fusedops.go), followed by the BitVec marking which bytes are opcodes. The two
+// are packed into one slice so the cache stores and sizes a single entry, and
+// the shadow and the bitmap are views into it.
+type CodeAnalysis []byte
+
+// analyzeCode runs the JUMPDEST analysis and the fused opcode pass over code.
+func analyzeCode(code []byte) CodeAnalysis {
+	n := len(code)
+	packed := make(CodeAnalysis, n+n/8+1+4)
+	copy(packed, code)
+	codeBitmapInternal(code, BitVec(packed[n:]))
+	fuseCode(code, packed[:n])
+	return packed
+}
+
+// bits returns the opcode bitmap for code of length n.
+func (a CodeAnalysis) bits(n int) BitVec {
+	return BitVec(a[n:])
+}
+
+// shadow returns the fetch array for the generated fast path, for code of length n.
+func (a CodeAnalysis) shadow(n int) []byte {
+	return a[:n]
+}

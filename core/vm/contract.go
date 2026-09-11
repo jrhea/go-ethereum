@@ -34,6 +34,11 @@ type Contract struct {
 	jumpDests JumpDestCache // Aggregated result of JUMPDEST analysis.
 	analysis  BitVec        // Locally cached result of JUMPDEST analysis
 
+	// ops is what the generated fast path fetches opcodes from. It starts out
+	// as Code and becomes the analysis' fused shadow once the first jump
+	// resolves the analysis, see setAnalysis. Everything else reads Code.
+	ops []byte
+
 	Code     []byte
 	CodeHash common.Hash
 	Input    []byte
@@ -92,28 +97,43 @@ func (c *Contract) isCode(udest uint64) bool {
 		analysis, exist := c.jumpDests.Load(c.CodeHash)
 		if !exist {
 			// Do the analysis and save in parent context
-			// We do not need to store it in c.analysis
-			analysis = codeBitmap(c.Code)
+			analysis = analyzeCode(c.Code)
 			c.jumpDests.Store(c.CodeHash, analysis)
 		}
 		// Also stash it in current contract for faster access
-		c.analysis = analysis
-		return analysis.codeSegment(udest)
+		c.setAnalysis(analysis)
+		return c.analysis.codeSegment(udest)
 	}
 	// We don't have the code hash, most likely a piece of initcode not already
 	// in state trie. In that case, we do an analysis, and save it locally, so
 	// we don't have to recalculate it for every JUMP instruction in the execution
 	// However, we don't save it within the parent context
-	if c.analysis == nil {
-		c.analysis = codeBitmap(c.Code)
-	}
+	c.setAnalysis(analyzeCode(c.Code))
 	return c.analysis.codeSegment(udest)
+}
+
+// setAnalysis installs a resolved analysis: the bitmap for the jump checks and
+// the fused shadow as the fast path's fetch array. The shadow is a view into
+// the cached entry and is never written.
+func (c *Contract) setAnalysis(analysis CodeAnalysis) {
+	c.analysis = analysis.bits(len(c.Code))
+	c.ops = analysis.shadow(len(c.Code))
 }
 
 // GetOp returns the n'th element in the contract's byte array
 func (c *Contract) GetOp(n uint64) OpCode {
 	if n < uint64(len(c.Code)) {
 		return OpCode(c.Code[n])
+	}
+	return STOP
+}
+
+// GetFastOp returns the n'th opcode as the generated fast path dispatches it:
+// from the fused shadow once the analysis is resolved, from the code until
+// then. Past the end it is STOP, like GetOp.
+func (c *Contract) GetFastOp(n uint64) OpCode {
+	if n < uint64(len(c.ops)) {
+		return OpCode(c.ops[n])
 	}
 	return STOP
 }
@@ -199,4 +219,5 @@ func (c *Contract) Value() *uint256.Int {
 func (c *Contract) SetCallCode(hash common.Hash, code []byte) {
 	c.Code = code
 	c.CodeHash = hash
+	c.ops = code
 }

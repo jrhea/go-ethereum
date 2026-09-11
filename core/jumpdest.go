@@ -34,17 +34,20 @@ const (
 	// shards and reduce mutex contention from the parallel prefetcher.
 	jumpDestBuckets = 8
 
-	// jumpDestBucketSize is the per-shard byte budget.
-	jumpDestBucketSize = 8 * 1024 * 1024
+	// jumpDestBucketSize is the per-shard byte budget. An entry is the code's
+	// fused shadow plus its bitmap, about 1.125 bytes per code byte, so the
+	// budget is sized in code bytes: 256 MiB in total holds roughly 230 MB of
+	// distinct contract code, against about 50 MB touched by 100 mainnet blocks.
+	jumpDestBucketSize = 32 * 1024 * 1024
 )
 
-// shardedJumpDestCache is a thread-safe, byte-bounded LRU of JUMPDEST analysis
-// bitmaps, sharded into independent buckets to reduce lock contention. It is
-// owned by BlockChain and shared across block processing and prefetching,
-// keyed by the immutable contract code hash.
+// shardedJumpDestCache is a thread-safe, byte-bounded LRU of code analyses (the
+// JUMPDEST bitmap plus the fused opcode shadow), sharded into independent
+// buckets to reduce lock contention. It is owned by BlockChain and shared across
+// block processing and prefetching, keyed by the immutable contract code hash.
 type shardedJumpDestCache struct {
 	buckets [jumpDestBuckets]struct {
-		dest *lru.SizeConstrainedCache[common.Hash, vm.BitVec]
+		dest *lru.SizeConstrainedCache[common.Hash, vm.CodeAnalysis]
 	}
 }
 
@@ -52,13 +55,13 @@ type shardedJumpDestCache struct {
 func NewJumpDestCache() vm.JumpDestCache {
 	c := new(shardedJumpDestCache)
 	for i := range c.buckets {
-		c.buckets[i].dest = lru.NewSizeConstrainedCache[common.Hash, vm.BitVec](jumpDestBucketSize)
+		c.buckets[i].dest = lru.NewSizeConstrainedCache[common.Hash, vm.CodeAnalysis](jumpDestBucketSize)
 	}
 	return c
 }
 
 // Load retrieves the cached jumpdest analysis for the given code hash.
-func (c *shardedJumpDestCache) Load(hash common.Hash) (vm.BitVec, bool) {
+func (c *shardedJumpDestCache) Load(hash common.Hash) (vm.CodeAnalysis, bool) {
 	bucket := &c.buckets[hash[0]&(jumpDestBuckets-1)]
 	v, ok := bucket.dest.Get(hash)
 	if ok {
@@ -70,7 +73,7 @@ func (c *shardedJumpDestCache) Load(hash common.Hash) (vm.BitVec, bool) {
 }
 
 // Store saves the jumpdest analysis for the given code hash.
-func (c *shardedJumpDestCache) Store(hash common.Hash, b vm.BitVec) {
+func (c *shardedJumpDestCache) Store(hash common.Hash, a vm.CodeAnalysis) {
 	bucket := &c.buckets[hash[0]&(jumpDestBuckets-1)]
-	bucket.dest.Add(hash, b)
+	bucket.dest.Add(hash, a)
 }

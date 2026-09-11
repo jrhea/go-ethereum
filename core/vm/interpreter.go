@@ -117,6 +117,11 @@ func (evm *EVM) Run(contract *Contract, input []byte, readOnly bool) (ret []byte
 		return nil, nil
 	}
 	contract.Input = input
+	// Callers outside the EVM set Code directly rather than through
+	// SetCallCode, so give the fast path something to fetch from.
+	if contract.ops == nil {
+		contract.ops = contract.Code
+	}
 
 	mem := NewMemory()         // bound memory
 	stack := evm.arena.stack() // local stack

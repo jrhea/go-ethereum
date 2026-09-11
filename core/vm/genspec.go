@@ -155,3 +155,22 @@ func sameOps(a, b *JumpTable) bool {
 	}
 	return true
 }
+
+// GenFusedOp describes one fused opcode for the generator: its byte value, the
+// identifier the generated case is labelled with, and the opcode sequence it
+// stands for. The escape has no sequence.
+type GenFusedOp struct {
+	Op   OpCode
+	Name string
+	Ops  []OpCode
+}
+
+// GenFusedOps returns the fused opcodes the analysis writes, longest sequence
+// first, followed by the escape. The generator emits one case per entry.
+func GenFusedOps() []GenFusedOp {
+	var out []GenFusedOp
+	for _, f := range fusedPatterns {
+		out = append(out, GenFusedOp{Op: f.op, Name: f.name, Ops: f.ops})
+	}
+	return append(out, GenFusedOp{Op: fusedEscape, Name: "fusedEscape"})
+}

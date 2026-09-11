@@ -40,8 +40,10 @@ func (evm *EVM) execUntraced(scope *ScopeContext) (ret []byte, err error) {
 	// its delta is not known until run time.
 	sp := stack.len()
 	// Each case fetches the opcode that follows it, see emitAdvance, so
-	// the loop only ever dispatches on one already in hand.
-	op = contract.GetOp(pc)
+	// the loop only ever dispatches on one already in hand. The fetch
+	// reads the contract's fused shadow once its analysis is resolved,
+	// which is where the fused opcodes come from, see fusedops.go.
+	op = contract.GetFastOp(pc)
 mainLoop:
 	for {
 		switch op {
@@ -60,7 +62,7 @@ mainLoop:
 			}
 			sp -= 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case MUL:
 			if sp < 2 {
@@ -77,7 +79,7 @@ mainLoop:
 			}
 			sp -= 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case SUB:
 			if sp < 2 {
@@ -94,7 +96,7 @@ mainLoop:
 			}
 			sp -= 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case DIV:
 			if sp < 2 {
@@ -111,7 +113,7 @@ mainLoop:
 			}
 			sp -= 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case MULMOD:
 			if sp < 3 {
@@ -128,7 +130,7 @@ mainLoop:
 			}
 			sp -= 2
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case SIGNEXTEND:
 			if sp < 2 {
@@ -145,7 +147,7 @@ mainLoop:
 			}
 			sp -= 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case LT:
 			if sp < 2 {
@@ -162,7 +164,7 @@ mainLoop:
 			}
 			sp -= 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case GT:
 			if sp < 2 {
@@ -179,7 +181,7 @@ mainLoop:
 			}
 			sp -= 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case SLT:
 			if sp < 2 {
@@ -196,7 +198,7 @@ mainLoop:
 			}
 			sp -= 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case SGT:
 			if sp < 2 {
@@ -213,7 +215,7 @@ mainLoop:
 			}
 			sp -= 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case EQ:
 			if sp < 2 {
@@ -230,7 +232,7 @@ mainLoop:
 			}
 			sp -= 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case ISZERO:
 			if sp < 1 {
@@ -246,7 +248,7 @@ mainLoop:
 				break mainLoop
 			}
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case AND:
 			if sp < 2 {
@@ -263,7 +265,7 @@ mainLoop:
 			}
 			sp -= 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case OR:
 			if sp < 2 {
@@ -280,7 +282,7 @@ mainLoop:
 			}
 			sp -= 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case NOT:
 			if sp < 1 {
@@ -296,7 +298,7 @@ mainLoop:
 				break mainLoop
 			}
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case SHL:
 			if rules.IsConstantinople {
@@ -314,7 +316,7 @@ mainLoop:
 				}
 				sp -= 1
 				pc++
-				op = contract.GetOp(pc)
+				op = contract.GetFastOp(pc)
 				continue mainLoop
 			}
 			res, err = opUndefined(&pc, evm, scope)
@@ -335,7 +337,7 @@ mainLoop:
 				}
 				sp -= 1
 				pc++
-				op = contract.GetOp(pc)
+				op = contract.GetFastOp(pc)
 				continue mainLoop
 			}
 			res, err = opUndefined(&pc, evm, scope)
@@ -356,7 +358,7 @@ mainLoop:
 				}
 				sp -= 1
 				pc++
-				op = contract.GetOp(pc)
+				op = contract.GetFastOp(pc)
 				continue mainLoop
 			}
 			res, err = opUndefined(&pc, evm, scope)
@@ -384,7 +386,7 @@ mainLoop:
 			}
 			sp -= 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case CALLER:
 			if sp > 1023 {
@@ -401,7 +403,7 @@ mainLoop:
 			}
 			sp += 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case CALLVALUE:
 			if sp > 1023 {
@@ -418,7 +420,7 @@ mainLoop:
 			}
 			sp += 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case CALLDATALOAD:
 			if sp < 1 {
@@ -434,7 +436,7 @@ mainLoop:
 				break mainLoop
 			}
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case CALLDATASIZE:
 			if sp > 1023 {
@@ -451,7 +453,7 @@ mainLoop:
 			}
 			sp += 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case CODECOPY:
 			if sp < 3 {
@@ -476,7 +478,7 @@ mainLoop:
 			}
 			sp -= 3
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case RETURNDATASIZE:
 			if rules.IsByzantium {
@@ -494,7 +496,7 @@ mainLoop:
 				}
 				sp += 1
 				pc++
-				op = contract.GetOp(pc)
+				op = contract.GetFastOp(pc)
 				continue mainLoop
 			}
 			res, err = opUndefined(&pc, evm, scope)
@@ -514,7 +516,7 @@ mainLoop:
 			}
 			sp -= 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case MLOAD:
 			if sp < 1 {
@@ -538,7 +540,7 @@ mainLoop:
 				break mainLoop
 			}
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case MSTORE:
 			if sp < 2 {
@@ -563,7 +565,7 @@ mainLoop:
 			}
 			sp -= 2
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case JUMP:
 			if sp < 1 {
@@ -574,13 +576,27 @@ mainLoop:
 				res, err = nil, ErrOutOfGas
 				break mainLoop
 			}
-			res, err = opJump(&pc, evm, scope)
-			if err != nil {
+			if evm.abort.Load() {
+				res, err = nil, errStopToken
 				break mainLoop
 			}
+			pos := stack.pop1()
 			sp -= 1
-			pc++
-			op = contract.GetOp(pc)
+			udest, overflow := pos.Uint64WithOverflow()
+			if overflow {
+				res, err = nil, ErrInvalidJump
+				break mainLoop
+			}
+			if udest >= uint64(len(contract.ops)) || OpCode(contract.ops[udest]) != JUMPDEST || !contract.isCode(udest) {
+				res, err = nil, ErrInvalidJump
+				break mainLoop
+			}
+			if !contract.Gas.ChargeExecutionOnly(1) {
+				res, err = nil, ErrOutOfGas
+				break mainLoop
+			}
+			pc = udest + 1
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case JUMPI:
 			if sp < 2 {
@@ -591,13 +607,32 @@ mainLoop:
 				res, err = nil, ErrOutOfGas
 				break mainLoop
 			}
-			res, err = opJumpi(&pc, evm, scope)
-			if err != nil {
+			if evm.abort.Load() {
+				res, err = nil, errStopToken
 				break mainLoop
 			}
+			pos, cond := stack.pop2()
 			sp -= 2
+			if !cond.IsZero() {
+				udest, overflow := pos.Uint64WithOverflow()
+				if overflow {
+					res, err = nil, ErrInvalidJump
+					break mainLoop
+				}
+				if udest >= uint64(len(contract.ops)) || OpCode(contract.ops[udest]) != JUMPDEST || !contract.isCode(udest) {
+					res, err = nil, ErrInvalidJump
+					break mainLoop
+				}
+				if !contract.Gas.ChargeExecutionOnly(1) {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				pc = udest + 1
+				op = contract.GetFastOp(pc)
+				continue mainLoop
+			}
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case GAS:
 			if sp > 1023 {
@@ -614,7 +649,7 @@ mainLoop:
 			}
 			sp += 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case JUMPDEST:
 			if !contract.Gas.ChargeExecutionOnly(1) {
@@ -626,7 +661,7 @@ mainLoop:
 				break mainLoop
 			}
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case PUSH0:
 			if rules.IsShanghai {
@@ -644,7 +679,7 @@ mainLoop:
 				}
 				sp += 1
 				pc++
-				op = contract.GetOp(pc)
+				op = contract.GetFastOp(pc)
 				continue mainLoop
 			}
 			res, err = opUndefined(&pc, evm, scope)
@@ -664,7 +699,7 @@ mainLoop:
 			}
 			sp += 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case PUSH2:
 			if sp > 1023 {
@@ -681,7 +716,7 @@ mainLoop:
 			}
 			sp += 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case PUSH3:
 			if sp > 1023 {
@@ -698,7 +733,7 @@ mainLoop:
 			}
 			sp += 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case PUSH4:
 			if sp > 1023 {
@@ -715,7 +750,7 @@ mainLoop:
 			}
 			sp += 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case PUSH8:
 			if sp > 1023 {
@@ -732,7 +767,7 @@ mainLoop:
 			}
 			sp += 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case PUSH20:
 			if sp > 1023 {
@@ -749,7 +784,7 @@ mainLoop:
 			}
 			sp += 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case PUSH32:
 			if sp > 1023 {
@@ -766,7 +801,7 @@ mainLoop:
 			}
 			sp += 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case DUP1, DUP2, DUP3, DUP4, DUP5, DUP6, DUP7, DUP8, DUP9, DUP10, DUP11, DUP12, DUP13, DUP14, DUP15, DUP16:
 			n := int(op-DUP1) + 1
@@ -784,7 +819,7 @@ mainLoop:
 			stack.dup(n)
 			sp += 1
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case SWAP1, SWAP2, SWAP3, SWAP4, SWAP5, SWAP6, SWAP7, SWAP8, SWAP9, SWAP10, SWAP11, SWAP12, SWAP13, SWAP14, SWAP15, SWAP16:
 			n := int(op-SWAP1) + 1
@@ -798,7 +833,7 @@ mainLoop:
 			}
 			stack.swap(n)
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		case RETURN:
 			if sp < 2 {
@@ -819,8 +854,180 @@ mainLoop:
 			}
 			sp -= 2
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
+		case fusedSelector:
+			if contract.analysis == nil {
+				res, err = opUndefined(&pc, evm, scope)
+				break mainLoop
+			}
+			if sp < 1 || sp > 1022 || !contract.Gas.ChargeExecutionOnly(22) {
+				op = DUP1
+				continue mainLoop
+			}
+			if evm.abort.Load() {
+				res, err = nil, errStopToken
+				break mainLoop
+			}
+			sel := stack.peek()
+			if sel.IsUint64() && sel.Uint64() == uint64(contract.ops[pc+2])<<24|uint64(contract.ops[pc+3])<<16|uint64(contract.ops[pc+4])<<8|uint64(contract.ops[pc+5]) {
+				udest := uint64(contract.ops[pc+8])<<8 | uint64(contract.ops[pc+9])
+				if udest >= uint64(len(contract.ops)) || OpCode(contract.ops[udest]) != JUMPDEST || !contract.isCode(udest) {
+					res, err = nil, ErrInvalidJump
+					break mainLoop
+				}
+				if !contract.Gas.ChargeExecutionOnly(1) {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				pc = udest + 1
+				op = contract.GetFastOp(pc)
+				continue mainLoop
+			}
+			pc += 11
+			op = contract.GetFastOp(pc)
+			continue mainLoop
+		case fusedShlSubConst:
+			if contract.analysis == nil {
+				res, err = opUndefined(&pc, evm, scope)
+				break mainLoop
+			}
+			if !rules.IsConstantinople || sp > 1021 || !contract.Gas.ChargeExecutionOnly(15) {
+				op = PUSH1
+				continue mainLoop
+			}
+			v := stack.get()
+			v.SetUint64(uint64(contract.ops[pc+3]))
+			v.Lsh(v, uint(contract.ops[pc+5]))
+			v.SubUint64(v, uint64(contract.ops[pc+1]))
+			sp += 1
+			pc += 8
+			op = contract.GetFastOp(pc)
+			continue mainLoop
+		case fusedLtIszeroPush2Jumpi:
+			if contract.analysis == nil {
+				res, err = opUndefined(&pc, evm, scope)
+				break mainLoop
+			}
+			if sp < 2 || !contract.Gas.ChargeExecutionOnly(19) {
+				op = LT
+				continue mainLoop
+			}
+			if evm.abort.Load() {
+				res, err = nil, errStopToken
+				break mainLoop
+			}
+			x, y := stack.pop2()
+			sp -= 2
+			if !x.Lt(y) {
+				udest := uint64(contract.ops[pc+3])<<8 | uint64(contract.ops[pc+4])
+				if udest >= uint64(len(contract.ops)) || OpCode(contract.ops[udest]) != JUMPDEST || !contract.isCode(udest) {
+					res, err = nil, ErrInvalidJump
+					break mainLoop
+				}
+				if !contract.Gas.ChargeExecutionOnly(1) {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				pc = udest + 1
+				op = contract.GetFastOp(pc)
+				continue mainLoop
+			}
+			pc += 6
+			op = contract.GetFastOp(pc)
+			continue mainLoop
+		case fusedIszeroPush2Jumpi:
+			if contract.analysis == nil {
+				res, err = opUndefined(&pc, evm, scope)
+				break mainLoop
+			}
+			if sp < 1 || sp > 1023 || !contract.Gas.ChargeExecutionOnly(16) {
+				op = ISZERO
+				continue mainLoop
+			}
+			if evm.abort.Load() {
+				res, err = nil, errStopToken
+				break mainLoop
+			}
+			x := stack.pop1()
+			sp -= 1
+			if x.IsZero() {
+				udest := uint64(contract.ops[pc+2])<<8 | uint64(contract.ops[pc+3])
+				if udest >= uint64(len(contract.ops)) || OpCode(contract.ops[udest]) != JUMPDEST || !contract.isCode(udest) {
+					res, err = nil, ErrInvalidJump
+					break mainLoop
+				}
+				if !contract.Gas.ChargeExecutionOnly(1) {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				pc = udest + 1
+				op = contract.GetFastOp(pc)
+				continue mainLoop
+			}
+			pc += 5
+			op = contract.GetFastOp(pc)
+			continue mainLoop
+		case fusedPush2Jump:
+			if contract.analysis == nil {
+				res, err = opUndefined(&pc, evm, scope)
+				break mainLoop
+			}
+			if sp > 1023 || !contract.Gas.ChargeExecutionOnly(11) {
+				op = PUSH2
+				continue mainLoop
+			}
+			if evm.abort.Load() {
+				res, err = nil, errStopToken
+				break mainLoop
+			}
+			udest := uint64(contract.ops[pc+1])<<8 | uint64(contract.ops[pc+2])
+			if udest >= uint64(len(contract.ops)) || OpCode(contract.ops[udest]) != JUMPDEST || !contract.isCode(udest) {
+				res, err = nil, ErrInvalidJump
+				break mainLoop
+			}
+			if !contract.Gas.ChargeExecutionOnly(1) {
+				res, err = nil, ErrOutOfGas
+				break mainLoop
+			}
+			pc = udest + 1
+			op = contract.GetFastOp(pc)
+			continue mainLoop
+		case fusedPush2Jumpi:
+			if contract.analysis == nil {
+				res, err = opUndefined(&pc, evm, scope)
+				break mainLoop
+			}
+			if sp < 1 || sp > 1023 || !contract.Gas.ChargeExecutionOnly(13) {
+				op = PUSH2
+				continue mainLoop
+			}
+			if evm.abort.Load() {
+				res, err = nil, errStopToken
+				break mainLoop
+			}
+			cond := stack.pop1()
+			sp -= 1
+			if !cond.IsZero() {
+				udest := uint64(contract.ops[pc+1])<<8 | uint64(contract.ops[pc+2])
+				if udest >= uint64(len(contract.ops)) || OpCode(contract.ops[udest]) != JUMPDEST || !contract.isCode(udest) {
+					res, err = nil, ErrInvalidJump
+					break mainLoop
+				}
+				if !contract.Gas.ChargeExecutionOnly(1) {
+					res, err = nil, ErrOutOfGas
+					break mainLoop
+				}
+				pc = udest + 1
+				op = contract.GetFastOp(pc)
+				continue mainLoop
+			}
+			pc += 4
+			op = contract.GetFastOp(pc)
+			continue mainLoop
+		case fusedEscape:
+			op = OpCode(contract.Code[pc])
+			fallthrough
 		default:
 			operation := table[op]
 			if sp < operation.minStack {
@@ -847,7 +1054,7 @@ mainLoop:
 			}
 			sp = stack.len()
 			pc++
-			op = contract.GetOp(pc)
+			op = contract.GetFastOp(pc)
 			continue mainLoop
 		}
 	}

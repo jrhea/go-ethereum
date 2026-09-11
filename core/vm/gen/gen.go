@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -174,7 +175,7 @@ func (g *generator) emitStackReload() {
 func (g *generator) emitAdvance() {
 	g.p(`
 		pc++
-		op = contract.GetOp(pc)
+		op = contract.GetFastOp(pc)
 		continue mainLoop
 	`)
 }
@@ -347,8 +348,10 @@ func (g *generator) createFile() {
 			// its delta is not known until run time.
 			sp := stack.len()
 			// Each case fetches the opcode that follows it, see emitAdvance, so
-			// the loop only ever dispatches on one already in hand.
-			op = contract.GetOp(pc)
+			// the loop only ever dispatches on one already in hand. The fetch
+			// reads the contract's fused shadow once its analysis is resolved,
+			// which is where the fused opcodes come from, see fusedops.go.
+			op = contract.GetFastOp(pc)
 		mainLoop:
 			for {
 				switch op {
@@ -366,11 +369,18 @@ func (g *generator) createFile() {
 		}
 		switch g.tierOf(b) {
 		case tierStatic:
-			g.emitStaticOp(b)
+			if b == byte(vm.JUMP) || b == byte(vm.JUMPI) {
+				g.emitJumpCase(b)
+			} else {
+				g.emitStaticOp(b)
+			}
 		case tierDynamic:
 			g.emitDynamicOp(b)
 		}
 	}
+
+	// the fused opcodes, then the escape, which falls through into default
+	g.emitFusedOps()
 
 	// the default case: fork-varying ops via the per-fork table
 	g.emitTableOp()

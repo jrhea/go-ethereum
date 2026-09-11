@@ -21,27 +21,27 @@ import "github.com/ethereum/go-ethereum/common"
 // JumpDestCache represents the cache of jumpdest analysis results.
 type JumpDestCache interface {
 	// Load retrieves the cached jumpdest analysis for the given code hash.
-	// Returns the BitVec and true if found, or nil and false if not cached.
-	Load(codeHash common.Hash) (BitVec, bool)
+	// Returns the analysis and true if found, or nil and false if not cached.
+	Load(codeHash common.Hash) (CodeAnalysis, bool)
 
 	// Store saves the jumpdest analysis for the given code hash.
-	Store(codeHash common.Hash, vec BitVec)
+	Store(codeHash common.Hash, analysis CodeAnalysis)
 }
 
 // mapJumpDests is the default implementation of JumpDests using a map.
 // This implementation is not thread-safe and is meant to be used per EVM instance.
-type mapJumpDests map[common.Hash]BitVec
+type mapJumpDests map[common.Hash]CodeAnalysis
 
 // newMapJumpDests creates a new map-based JumpDests implementation.
 func newMapJumpDests() JumpDestCache {
 	return make(mapJumpDests)
 }
 
-func (j mapJumpDests) Load(codeHash common.Hash) (BitVec, bool) {
+func (j mapJumpDests) Load(codeHash common.Hash) (CodeAnalysis, bool) {
 	vec, ok := j[codeHash]
 	return vec, ok
 }
 
-func (j mapJumpDests) Store(codeHash common.Hash, vec BitVec) {
-	j[codeHash] = vec
+func (j mapJumpDests) Store(codeHash common.Hash, analysis CodeAnalysis) {
+	j[codeHash] = analysis
 }
