@@ -19,7 +19,7 @@
 package crypto
 
 import (
-	"bytes"
+	"encoding/binary"
 	"hash/maphash"
 	"sync/atomic"
 
@@ -27,41 +27,91 @@ import (
 )
 
 const (
-	keccakCacheBits     = 17 // 128K entries, about 16 MB
+	keccakCacheBits     = 17 // 128K entries, 16 MB
 	keccakCacheMaxInput = 87 // longest input the cache holds
+	keccakCacheWords    = (keccakCacheMaxInput + 7) / 8
+
+	// The seq word holds the lock in bit 0, the input length plus one in bits 1-7,
+	// a version in bits 8-23 and the top 40 bits of the input's hash above that.
+	keccakSeqLocked      = 1
+	keccakSeqVersionUnit = 1 << 8
+	keccakSeqVersionMask = 0xffff << 8
+	keccakSeqKeyMask     = ^uint64(keccakSeqVersionMask)
 )
 
-// keccakCacheEntry holds one input and its hash, guarded by the busy flag.
+// keccakCacheEntry holds one input and its hash as words, so readers can load them atomically.
 type keccakCacheEntry struct {
-	busy atomic.Uint32
-	size uint8 // input length plus one, zero for an empty entry
-	data [keccakCacheMaxInput]byte
-	hash common.Hash
+	seq  atomic.Uint64
+	data [keccakCacheWords]atomic.Uint64
+	hash [4]atomic.Uint64
 }
 
 var (
-	keccakCache     [1 << keccakCacheBits]keccakCacheEntry
+	keccakCache     = new([1 << keccakCacheBits]keccakCacheEntry) // page aligned, so every 128 byte entry starts a cache line
 	keccakCacheSeed = maphash.MakeSeed()
 )
 
 // cachedKeccak256 returns the hash of a short input, reusing an earlier result for the same input.
 func cachedKeccak256(data []byte) common.Hash {
-	e := &keccakCache[maphash.Bytes(keccakCacheSeed, data)&(1<<keccakCacheBits-1)]
-	if !e.busy.CompareAndSwap(0, 1) {
-		// Another goroutine holds the entry, hash without it.
-		return keccak256(data)
+	h := maphash.Bytes(keccakCacheSeed, data)
+	e := &keccakCache[h&(1<<keccakCacheBits-1)]
+	key := h>>24<<24 | uint64(len(data)+1)<<1
+
+	var in [keccakCacheWords]uint64
+	n := keccakInputWords(data, &in)
+
+	// Lookups never write. A copy is only used if the seq word did not change while it was taken,
+	// and the key mask keeps the lock bit so a locked entry never matches.
+	if seq := e.seq.Load(); seq&keccakSeqKeyMask == key {
+		match := true
+		for i := 0; i < n; i++ {
+			if e.data[i].Load() != in[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			h0, h1, h2, h3 := e.hash[0].Load(), e.hash[1].Load(), e.hash[2].Load(), e.hash[3].Load()
+			if e.seq.Load() == seq {
+				var out common.Hash
+				binary.LittleEndian.PutUint64(out[0:], h0)
+				binary.LittleEndian.PutUint64(out[8:], h1)
+				binary.LittleEndian.PutUint64(out[16:], h2)
+				binary.LittleEndian.PutUint64(out[24:], h3)
+				return out
+			}
+		}
 	}
-	if int(e.size) == len(data)+1 && bytes.Equal(e.data[:len(data)], data) {
-		h := e.hash
-		e.busy.Store(0)
-		return h
+	out := keccak256(data)
+
+	// Store unless another goroutine is writing the entry. The version bump tells readers
+	// that overlapped this write to discard their copy, even if the input is the same.
+	if seq := e.seq.Load(); seq&keccakSeqLocked == 0 && e.seq.CompareAndSwap(seq, seq|keccakSeqLocked) {
+		for i := 0; i < n; i++ {
+			e.data[i].Store(in[i])
+		}
+		e.hash[0].Store(binary.LittleEndian.Uint64(out[0:]))
+		e.hash[1].Store(binary.LittleEndian.Uint64(out[8:]))
+		e.hash[2].Store(binary.LittleEndian.Uint64(out[16:]))
+		e.hash[3].Store(binary.LittleEndian.Uint64(out[24:]))
+		e.seq.Store(key | (seq+keccakSeqVersionUnit)&keccakSeqVersionMask)
 	}
-	h := keccak256(data)
-	e.size = uint8(len(data) + 1)
-	copy(e.data[:], data)
-	e.hash = h
-	e.busy.Store(0)
-	return h
+	return out
+}
+
+// keccakInputWords packs data into little endian words, zero padding the last one, and returns the word count.
+func keccakInputWords(data []byte, words *[keccakCacheWords]uint64) int {
+	n := len(data) / 8
+	for i := 0; i < n; i++ {
+		words[i] = binary.LittleEndian.Uint64(data[i*8:])
+	}
+	if r := len(data) % 8; r != 0 {
+		var tail [8]byte
+		copy(tail[:], data[n*8:])
+		words[n] = binary.LittleEndian.Uint64(tail[:])
+		n++
+	}
+	return n
 }
 
 // keccak256 hashes a single input without the cache.
