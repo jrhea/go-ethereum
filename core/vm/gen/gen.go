@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -52,9 +53,10 @@ const (
 var pgoFiles = []string{"cmd/geth/default.pgo", "cmd/evm/default.pgo"}
 
 type generator struct {
-	specs [256]opSpec
-	tiers [256]tier
-	buf   *bytes.Buffer
+	specs  [256]opSpec
+	tiers  [256]tier
+	gasUse map[string]bool // opcode functions that touch a Gas field
+	buf    *bytes.Buffer
 }
 
 // p is the writer of the generated file. Every line of output is appended
@@ -99,16 +101,45 @@ func (g *generator) emitStackChecks(minExpr, maxExpr any, under, over bool) {
 	}
 }
 
-// emitStaticGas charges amount through ChargeExecutionOnly. amount is a constant in
-// an opcode's own case, operation.constantGas in the table path. The method is small
-// enough that the compiler inlines it without help.
+// emitStaticGas charges amount against the gas local. amount is a constant in
+// an opcode's own case, operation.constantGas in the table path.
 func (g *generator) emitStaticGas(amount any) {
 	g.p(`
-		if !contract.Gas.ChargeExecutionOnly(%v) {
+		if gas < %v {
 			res, err = nil, ErrOutOfGas
 			break mainLoop
 		}
-	`, amount)
+		gas -= %v
+	`, amount, amount)
+}
+
+// emitSettleGas writes the gas local back to the frame and takes the bias off
+// UsedExecutionGas, for code that reads or charges the frame's gas itself.
+func (g *generator) emitSettleGas() {
+	g.p(`
+		contract.Gas.UsedExecutionGas -= gas
+		contract.Gas.ExecutionGas = gas
+	`)
+}
+
+// emitPickupGas takes the frame's gas back into the local after a settle.
+func (g *generator) emitPickupGas() {
+	g.p(`
+		gas = contract.Gas.ExecutionGas
+		contract.Gas.UsedExecutionGas += gas
+	`)
+}
+
+// emitCallSettled calls a handler with the frame's gas settled and picks the gas
+// up again before looking at the error.
+func (g *generator) emitCallSettled(call string) {
+	g.p("res, err = %s\n", call)
+	g.emitPickupGas()
+	g.p(`
+		if err != nil {
+			break mainLoop
+		}
+	`)
 }
 
 // emitDynamicGas emits the memory sizing and dynamic gas charge through the shared
@@ -116,6 +147,7 @@ func (g *generator) emitStaticGas(amount any) {
 // operation, so the case pays one table load even though it calls its handler by
 // name.
 func (g *generator) emitDynamicGas() {
+	g.emitSettleGas()
 	g.p(`
 		operation := table[op]
 		var memorySize uint64
@@ -126,6 +158,17 @@ func (g *generator) emitDynamicGas() {
 			mem.Resize(memorySize)
 		}
 	`)
+	g.emitPickupGas()
+}
+
+// memoryWidths gives how many bytes an access touches at its offset, keyed by the
+// memory size function. An opcode with one of these and memory expansion as its
+// only dynamic gas pays nothing extra inside memory that is already there, so its
+// case skips the dynamic gas when the access fits.
+var memoryWidths = map[string]uint64{
+	"memoryMLoad":   32,
+	"memoryMStore":  32,
+	"memoryMStore8": 1,
 }
 
 // emitUndefinedFallback emits what a fork-gated opcode does before its fork activates.
@@ -169,7 +212,7 @@ func (g *generator) emitStackReload() {
 func (g *generator) emitAdvance() {
 	g.p(`
 		pc++
-		op = contract.GetOp(pc)
+		op = opAt(code, pc)
 		continue mainLoop
 	`)
 }
@@ -188,8 +231,20 @@ func (g *generator) emitStaticOp(code byte) {
 	if spec.ConstantGas != 0 {
 		g.emitStaticGas(spec.ConstantGas)
 	}
-	g.emitCallHandler(g.handlerCall(code))
+	moved, jumps := jumpHandlers[spec.ExecuteFn]
+	if moved {
+		g.p("from := pc\n")
+	}
+	if g.gasUse[spec.ExecuteFn] {
+		g.emitSettleGas()
+		g.emitCallSettled(g.handlerCall(code))
+	} else {
+		g.emitCallHandler(g.handlerCall(code))
+	}
 	g.emitStackStep(spec.stackDelta())
+	if jumps {
+		g.emitJumpdestLanding(moved)
+	}
 	g.emitAdvance()
 
 	// Close the fork gate opened above, then the branch taken while the fork is
@@ -200,10 +255,38 @@ func (g *generator) emitStaticOp(code byte) {
 	}
 }
 
+// jumpHandlers names the jump handlers. One that returns without an error and
+// jumped has left pc right before a JUMPDEST. opJump always jumps, opJumpi only
+// when it moved pc, which the value says to check.
+var jumpHandlers = map[string]bool{
+	"opJump":  false,
+	"opJumpi": true,
+}
+
+// emitJumpdestLanding charges the landing JUMPDEST and steps over it, so the
+// loop does not dispatch an opcode that only costs gas. A jump to the very next
+// instruction leaves pc where it was, so opJumpi's case skips the landing then
+// and the JUMPDEST is dispatched as usual.
+func (g *generator) emitJumpdestLanding(moved bool) {
+	jd := g.specs[byte(vm.JUMPDEST)]
+	if g.tierOf(byte(vm.JUMPDEST)) != tierStatic || jd.ExecuteFn != "opJumpdest" || jd.MinStack != 0 || jd.stackDelta() != 0 {
+		abortf("JUMPDEST is no longer a constant gas no-op, so a jump cannot run it in place")
+	}
+	if moved {
+		g.p("if pc != from {\n")
+	}
+	g.emitStaticGas(jd.ConstantGas)
+	g.p("pc++\n")
+	if moved {
+		g.p("}\n")
+	}
+}
+
 // emitDynamicOp emits a case for a fork-invariant opcode that carries dynamic gas.
-// It differs from the table path only in calling the handler by name rather than
-// through a table pointer, and in emitting its static gas and stack bounds as
-// constants. Like emitStaticOp, it is gated on the introducing fork.
+// It differs from the table path in calling the handler by name rather than
+// through a table pointer, in emitting its static gas and stack bounds as
+// constants, and in skipping the dynamic gas for a memory access that needs no
+// expansion. Like emitStaticOp, it is gated on the introducing fork.
 func (g *generator) emitDynamicOp(code byte) {
 	spec := g.specs[code]
 	g.p("case %s:\n", spec.Name)
@@ -214,8 +297,21 @@ func (g *generator) emitDynamicOp(code byte) {
 	if spec.ConstantGas != 0 {
 		g.emitStaticGas(spec.ConstantGas)
 	}
+	width, ok := memoryWidths[spec.MemorySizeFn]
+	guard := ok && spec.DynamicGasFn == "pureMemoryGascost"
+	if guard {
+		g.p("if !mem.covers(stack.peek(), %d) {\n", width)
+	}
 	g.emitDynamicGas()
-	g.emitCallHandler(g.handlerCall(code))
+	if guard {
+		g.p("}\n")
+	}
+	if g.gasUse[spec.ExecuteFn] {
+		g.emitSettleGas()
+		g.emitCallSettled(g.handlerCall(code))
+	} else {
+		g.emitCallHandler(g.handlerCall(code))
+	}
 	g.emitStackStep(spec.stackDelta())
 	g.emitAdvance()
 
@@ -271,6 +367,7 @@ func (g *generator) emitTableOp() {
 	`)
 	g.emitStackChecks("operation.minStack", "operation.maxStack", true, true)
 	g.emitStaticGas("operation.constantGas")
+	g.emitSettleGas()
 	g.p(`
 			var memorySize uint64
 			if memorySize, _, err = contract.meterDynamicGas(operation, evm, stack, mem); err != nil {
@@ -280,7 +377,7 @@ func (g *generator) emitTableOp() {
 				mem.Resize(memorySize)
 			}
 	`)
-	g.emitCallHandler("operation.execute(&pc, evm, scope)")
+	g.emitCallSettled("operation.execute(&pc, evm, scope)")
 	g.emitStackReload()
 	g.emitAdvance()
 }
@@ -327,6 +424,7 @@ func (g *generator) createFile() {
 		func (evm *EVM) execUntraced(scope *ScopeContext) (ret []byte, err error) {
 			var (
 				contract = scope.Contract
+				code     = contract.Code
 				mem      = scope.Memory
 				stack    = scope.Stack
 				table    = evm.table
@@ -342,9 +440,15 @@ func (g *generator) createFile() {
 			// by its opcode's known delta, and the table case re-reads it because
 			// its delta is not known until run time.
 			sp := stack.len()
+			// gas is the execution gas in hand. While the loop runs,
+			// UsedExecutionGas carries it as a bias, so a charge is one
+			// subtraction from a local. The frame is settled before anything
+			// else reads or charges its gas, and again on the way out.
+			gas := contract.Gas.ExecutionGas
+			contract.Gas.UsedExecutionGas += gas
 			// Each case fetches the opcode that follows it, see emitAdvance, so
 			// the loop only ever dispatches on one already in hand.
-			op = contract.GetOp(pc)
+			op = opAt(code, pc)
 		mainLoop:
 			for {
 				switch op {
@@ -375,6 +479,8 @@ func (g *generator) createFile() {
 	g.p(`
 				}
 			}
+			contract.Gas.UsedExecutionGas -= gas
+			contract.Gas.ExecutionGas = gas
 			if err == errStopToken {
 				err = nil
 			}
@@ -434,7 +540,7 @@ func generate() (out []byte, err error) {
 		}
 	}()
 
-	g := &generator{buf: new(bytes.Buffer)}
+	g := &generator{buf: new(bytes.Buffer), gasUse: gasUsers()}
 	g.deriveSpecs(genForks())
 	g.createFile()
 

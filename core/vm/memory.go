@@ -110,6 +110,13 @@ func (m *Memory) GetPtr(offset, size uint64) []byte {
 	return m.store[offset : offset+size]
 }
 
+// covers reports whether memory already holds size bytes at off, so an access
+// there costs no expansion gas.
+func (m *Memory) covers(off *uint256.Int, size uint64) bool {
+	n := uint64(len(m.store))
+	return off.IsUint64() && off.Uint64() <= n && n-off.Uint64() >= size
+}
+
 // Len returns the length of the backing slice
 func (m *Memory) Len() int {
 	return len(m.store)
