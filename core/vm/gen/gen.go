@@ -25,6 +25,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -128,6 +129,16 @@ func (g *generator) emitDynamicGas() {
 	`)
 }
 
+// memoryWidths gives how many bytes an access touches at its offset, keyed by the
+// memory size function. An opcode with one of these and memory expansion as its
+// only dynamic gas pays nothing extra inside memory that is already there, so its
+// case skips the dynamic gas when the access fits.
+var memoryWidths = map[string]uint64{
+	"memoryMLoad":   32,
+	"memoryMStore":  32,
+	"memoryMStore8": 1,
+}
+
 // emitUndefinedFallback emits what a fork-gated opcode does before its fork activates.
 // The opcode does not exist yet, so the case matches the legacy loop's handling of an
 // undefined one.
@@ -169,7 +180,7 @@ func (g *generator) emitStackReload() {
 func (g *generator) emitAdvance() {
 	g.p(`
 		pc++
-		op = contract.GetOp(pc)
+		op = opAt(code, pc)
 		continue mainLoop
 	`)
 }
@@ -188,8 +199,15 @@ func (g *generator) emitStaticOp(code byte) {
 	if spec.ConstantGas != 0 {
 		g.emitStaticGas(spec.ConstantGas)
 	}
+	moved, jumps := jumpHandlers[spec.ExecuteFn]
+	if moved {
+		g.p("from := pc\n")
+	}
 	g.emitCallHandler(g.handlerCall(code))
 	g.emitStackStep(spec.stackDelta())
+	if jumps {
+		g.emitJumpdestLanding(moved)
+	}
 	g.emitAdvance()
 
 	// Close the fork gate opened above, then the branch taken while the fork is
@@ -200,10 +218,38 @@ func (g *generator) emitStaticOp(code byte) {
 	}
 }
 
+// jumpHandlers names the jump handlers. One that returns without an error and
+// jumped has left pc right before a JUMPDEST. opJump always jumps, opJumpi only
+// when it moved pc, which the value says to check.
+var jumpHandlers = map[string]bool{
+	"opJump":  false,
+	"opJumpi": true,
+}
+
+// emitJumpdestLanding charges the landing JUMPDEST and steps over it, so the
+// loop does not dispatch an opcode that only costs gas. A jump to the very next
+// instruction leaves pc where it was, so opJumpi's case skips the landing then
+// and the JUMPDEST is dispatched as usual.
+func (g *generator) emitJumpdestLanding(moved bool) {
+	jd := g.specs[byte(vm.JUMPDEST)]
+	if g.tierOf(byte(vm.JUMPDEST)) != tierStatic || jd.ExecuteFn != "opJumpdest" || jd.MinStack != 0 || jd.stackDelta() != 0 {
+		abortf("JUMPDEST is no longer a constant gas no-op, so a jump cannot run it in place")
+	}
+	if moved {
+		g.p("if pc != from {\n")
+	}
+	g.emitStaticGas(jd.ConstantGas)
+	g.p("pc++\n")
+	if moved {
+		g.p("}\n")
+	}
+}
+
 // emitDynamicOp emits a case for a fork-invariant opcode that carries dynamic gas.
-// It differs from the table path only in calling the handler by name rather than
-// through a table pointer, and in emitting its static gas and stack bounds as
-// constants. Like emitStaticOp, it is gated on the introducing fork.
+// It differs from the table path in calling the handler by name rather than
+// through a table pointer, in emitting its static gas and stack bounds as
+// constants, and in skipping the dynamic gas for a memory access that needs no
+// expansion. Like emitStaticOp, it is gated on the introducing fork.
 func (g *generator) emitDynamicOp(code byte) {
 	spec := g.specs[code]
 	g.p("case %s:\n", spec.Name)
@@ -214,7 +260,15 @@ func (g *generator) emitDynamicOp(code byte) {
 	if spec.ConstantGas != 0 {
 		g.emitStaticGas(spec.ConstantGas)
 	}
+	width, ok := memoryWidths[spec.MemorySizeFn]
+	guard := ok && spec.DynamicGasFn == "pureMemoryGascost"
+	if guard {
+		g.p("if !mem.covers(stack.peek(), %d) {\n", width)
+	}
 	g.emitDynamicGas()
+	if guard {
+		g.p("}\n")
+	}
 	g.emitCallHandler(g.handlerCall(code))
 	g.emitStackStep(spec.stackDelta())
 	g.emitAdvance()
@@ -327,6 +381,7 @@ func (g *generator) createFile() {
 		func (evm *EVM) execUntraced(scope *ScopeContext) (ret []byte, err error) {
 			var (
 				contract = scope.Contract
+				code     = contract.Code
 				mem      = scope.Memory
 				stack    = scope.Stack
 				table    = evm.table
@@ -344,7 +399,7 @@ func (g *generator) createFile() {
 			sp := stack.len()
 			// Each case fetches the opcode that follows it, see emitAdvance, so
 			// the loop only ever dispatches on one already in hand.
-			op = contract.GetOp(pc)
+			op = opAt(code, pc)
 		mainLoop:
 			for {
 				switch op {

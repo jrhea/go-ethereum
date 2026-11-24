@@ -152,6 +152,20 @@ var diffPrograms = []struct {
 	{"push0-push32", asm(PUSH0, PUSH3, 0x01, 0x02, 0x03, ADD, PUSH5, 0x01, 0x02, 0x03, 0x04, 0x05, ADD, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
 	{"keccak", asm(PUSH1, 0x20, PUSH1, 0x00, KECCAK256, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
 	{"memory", asm(PUSH1, 0xab, PUSH1, 0x00, MSTORE8, PUSH1, 0xcd, PUSH2, 0x00, 0x40, MSTORE, MSIZE, PUSH1, 0x60, MSTORE, PUSH1, 0x80, PUSH1, 0x00, RETURN), 100000},
+	// MLOAD and MSTORE skip the dynamic gas when memory already covers them. These
+	// land exactly at the end of memory, where the skip is right, and one byte past
+	// it, where memory must still grow. Memory gas is charged on the total size, so
+	// a later expansion would hide a missed one. MSIZE is read right after instead.
+	{"memory-edges", asm(
+		PUSH1, 0x01, PUSH1, 0x20, MSTORE, // memory is 64 bytes
+		PUSH1, 0x20, MLOAD, // ends at 64
+		PUSH1, 0x21, MLOAD, MSIZE, // one byte past, grows to 96
+		PUSH1, 0x02, PUSH1, 0x41, MSTORE, MSIZE, // one byte past, grows to 128
+		PUSH1, 0x03, PUSH1, 0x60, MSTORE, // ends at 128
+		ADD, ADD, ADD, PUSH1, 0x00, MSTORE,
+		MSIZE, PUSH1, 0x00, RETURN), 100000},
+	// An offset of 2^64 has a low word inside memory but must still fail.
+	{"memory-offset-above-64-bits", asm(PUSH1, 0x01, PUSH1, 0x00, MSTORE, PUSH9, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, MLOAD, STOP), 100000},
 	{"mcopy", asm(PUSH1, 0xff, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, PUSH1, 0x20, MCOPY, PUSH1, 0x40, PUSH1, 0x00, RETURN), 100000},
 	{"storage", asm(PUSH1, 0x63, PUSH1, 0x07, SSTORE, PUSH1, 0x07, SLOAD, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
 	{"transient", asm(PUSH1, 0x63, PUSH1, 0x07, TSTORE, PUSH1, 0x07, TLOAD, PUSH1, 0x00, MSTORE, PUSH1, 0x20, PUSH1, 0x00, RETURN), 100000},
@@ -437,6 +451,24 @@ func TestInterpreterDiffBounds(t *testing.T) {
 					checkDiff(t, fk.cfg, fk.merged, withDepth(operation.minStack), gas)
 				}
 			})
+		}
+	}
+}
+
+// TestInterpreterDiffJumpLanding runs jumps whose case charges the landing
+// JUMPDEST itself, with gas around what the landing needs, against the table loop.
+func TestInterpreterDiffJumpLanding(t *testing.T) {
+	progs := [][]byte{
+		asm(PUSH1, 0x04, JUMP, INVALID, JUMPDEST, STOP),
+		asm(PUSH1, 0x01, PUSH1, 0x06, JUMPI, INVALID, JUMPDEST, STOP),
+		// The destination is the next instruction, so pc does not move.
+		asm(PUSH1, 0x01, PUSH1, 0x05, JUMPI, JUMPDEST, STOP),
+	}
+	for _, fk := range diffForks {
+		for _, code := range progs {
+			for gas := uint64(10); gas <= 20; gas++ {
+				checkDiff(t, fk.cfg, fk.merged, code, gas)
+			}
 		}
 	}
 }

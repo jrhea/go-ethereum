@@ -112,8 +112,14 @@ func (c *Contract) isCode(udest uint64) bool {
 
 // GetOp returns the n'th element in the contract's byte array
 func (c *Contract) GetOp(n uint64) OpCode {
-	if n < uint64(len(c.Code)) {
-		return OpCode(c.Code[n])
+	return opAt(c.Code, n)
+}
+
+// opAt returns the opcode at n in code, or STOP past its end. The generated
+// dispatch holds the code in a local, since a frame never changes its code.
+func opAt(code []byte, n uint64) OpCode {
+	if n < uint64(len(code)) {
+		return OpCode(code[n])
 	}
 	return STOP
 }
